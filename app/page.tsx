@@ -145,9 +145,17 @@ export default function AudiobookApp() {
   const currentChunkRef = useRef(0);
   const chunksRef = useRef<string[]>([]);
   const chunkToParagraphRef = useRef<number[]>([]);
+  const chunkOffsetInParagraphRef = useRef<number[]>([]);
   const hasTitleChunkRef = useRef(false);
   const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playbackGenRef = useRef(0);
+  const activeAudioGenRef = useRef(-1);
+  const wordRafRef = useRef<number | null>(null);
+  const [activeWordRange, setActiveWordRange] = useState<{
+    paragraphIndex: number;
+    start: number;
+    end: number;
+  } | null>(null);
   const playChunkRef = useRef<(index: number, gen?: number) => void>(() => {});
   const persistNowRef = useRef<(overrideChunk?: number) => void>(() => {});
   const cloudSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -367,6 +375,7 @@ export default function AudiobookApp() {
       chunks: newChunks,
       paragraphToChunkStart: pToC,
       chunkToParagraph: cToP,
+      chunkOffsetInParagraph: cOffsets,
       hasTitleChunk,
     } = buildParagraphChunks(newParagraphs, 450, chapterTitle);
 
@@ -381,6 +390,7 @@ export default function AudiobookApp() {
     setParagraphToChunkStart(pToC);
     setChunkToParagraph(cToP);
     chunkToParagraphRef.current = cToP;
+    chunkOffsetInParagraphRef.current = cOffsets;
     setCurrentChunk(clampedStart);
     currentChunkRef.current = clampedStart;
     setActiveParagraph(cToP[clampedStart] ?? -1);
@@ -787,6 +797,8 @@ export default function AudiobookApp() {
     } catch {}
 
     const newGen = ++playbackGenRef.current;
+    activeAudioGenRef.current = -1;
+    stopWordHighlightLoop();
     if (pauseTimerRef.current) {
       clearTimeout(pauseTimerRef.current);
       pauseTimerRef.current = null;
@@ -868,8 +880,85 @@ export default function AudiobookApp() {
     });
   }
 
+  function stopWordHighlightLoop() {
+    if (wordRafRef.current !== null) {
+      cancelAnimationFrame(wordRafRef.current);
+      wordRafRef.current = null;
+    }
+    setActiveWordRange(null);
+  }
+
+  function startWordHighlightLoop(chunkIndex: number, gen: number) {
+    stopWordHighlightLoop();
+    const pIdx = chunkToParagraphRef.current[chunkIndex] ?? -1;
+    const chunkText = chunksRef.current[chunkIndex] || '';
+    if (pIdx < 0 || !chunkText) return;
+
+    const baseOffset = chunkOffsetInParagraphRef.current[chunkIndex] ?? 0;
+
+    // Build word tokens weighted by character length for even Vietnamese pacing
+    const words: { start: number; end: number; weight: number }[] = [];
+    const wordRegex = /\S+/g;
+    let m: RegExpExecArray | null;
+    while ((m = wordRegex.exec(chunkText)) !== null) {
+      words.push({
+        start: baseOffset + m.index,
+        end: baseOffset + m.index + m[0].length,
+        weight: Math.max(1, m[0].length),
+      });
+    }
+    if (words.length === 0) return;
+
+    // Group into 1-2 word phrases
+    const phrases: { start: number; end: number; cumEnd: number }[] = [];
+    const totalWeight = words.reduce((acc, w) => acc + w.weight, 0);
+    let running = 0;
+    for (let i = 0; i < words.length; i += 2) {
+      const first = words[i];
+      const second = words[i + 1];
+      running += first.weight + (second ? second.weight : 0);
+      phrases.push({
+        start: first.start,
+        end: second ? second.end : first.end,
+        cumEnd: running / totalWeight,
+      });
+    }
+
+    let lastStart = -1;
+    let lastEnd = -1;
+
+    const tick = () => {
+      if (!isPlayingRef.current || gen !== playbackGenRef.current || activeAudioGenRef.current !== gen) {
+        wordRafRef.current = null;
+        return;
+      }
+      const audio = audioRef.current;
+      // Strict playback lock: only advance when audio is actively playing with valid progress
+      if (
+        audio &&
+        !audio.paused &&
+        audio.currentTime > 0 &&
+        Number.isFinite(audio.duration) &&
+        audio.duration > 0
+      ) {
+        const progress = Math.max(0, Math.min(1, audio.currentTime / audio.duration));
+        const match = phrases.find((p) => progress <= p.cumEnd) || phrases[phrases.length - 1];
+        if (match && (match.start !== lastStart || match.end !== lastEnd)) {
+          lastStart = match.start;
+          lastEnd = match.end;
+          setActiveWordRange({ paragraphIndex: pIdx, start: match.start, end: match.end });
+        }
+      }
+      wordRafRef.current = requestAnimationFrame(tick);
+    };
+
+    wordRafRef.current = requestAnimationFrame(tick);
+  }
+
   async function playChunk(index: number, gen = playbackGenRef.current) {
     if (!isPlayingRef.current || gen !== playbackGenRef.current) return;
+    activeAudioGenRef.current = -1;
+    stopWordHighlightLoop();
     const c = chunksRef.current;
     if (index >= c.length) {
       // Chapter finished
@@ -943,6 +1032,7 @@ export default function AudiobookApp() {
       return;
     }
 
+    activeAudioGenRef.current = gen;
     audio.src = blobUrl;
     audio.playbackRate = speed;
     audio.volume = volume;
@@ -1037,6 +1127,8 @@ export default function AudiobookApp() {
 
   function stopPlayback() {
     playbackGenRef.current += 1;
+    activeAudioGenRef.current = -1;
+    stopWordHighlightLoop();
     isPlayingRef.current = false;
     setIsPlaying(false);
     setIsSynthesizing(false);
@@ -1064,6 +1156,8 @@ export default function AudiobookApp() {
 
   function seekToChunk(targetChunk: number, autoPlay = isPlayingRef.current) {
     const gen = ++playbackGenRef.current;
+    activeAudioGenRef.current = -1;
+    stopWordHighlightLoop();
     const clamped = Math.max(0, Math.min(targetChunk, Math.max(0, chunksRef.current.length - 1)));
     if (pauseTimerRef.current) {
       clearTimeout(pauseTimerRef.current);
@@ -1185,12 +1279,23 @@ export default function AudiobookApp() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Audio element event: on ended → play next chunk
+  // Audio element events: tie word highlight strictly to real audio playback
   useEffect(() => {
     const audio = new Audio();
     audioRef.current = audio;
 
-    audio.addEventListener('ended', () => {
+    const onPlaying = () => {
+      const gen = playbackGenRef.current;
+      if (!isPlayingRef.current || activeAudioGenRef.current !== gen) return;
+      startWordHighlightLoop(currentChunkRef.current, gen);
+    };
+
+    const onFreezeOrClear = () => {
+      stopWordHighlightLoop();
+    };
+
+    const onEnded = () => {
+      stopWordHighlightLoop();
       const finishedIdx = currentChunkRef.current;
       // Revoke old blob
       const oldUrl = blobCache.current.get(finishedIdx);
@@ -1210,9 +1315,20 @@ export default function AudiobookApp() {
           playChunkRef.current(finishedIdx + 1, gen);
         }
       }
-    });
+    };
+
+    audio.addEventListener('playing', onPlaying);
+    audio.addEventListener('pause', onFreezeOrClear);
+    audio.addEventListener('waiting', onFreezeOrClear);
+    audio.addEventListener('error', onFreezeOrClear);
+    audio.addEventListener('ended', onEnded);
 
     return () => {
+      audio.removeEventListener('playing', onPlaying);
+      audio.removeEventListener('pause', onFreezeOrClear);
+      audio.removeEventListener('waiting', onFreezeOrClear);
+      audio.removeEventListener('error', onFreezeOrClear);
+      audio.removeEventListener('ended', onEnded);
       audio.pause();
       audio.src = '';
     };
@@ -1973,6 +2089,11 @@ export default function AudiobookApp() {
                 >
                   {paragraphs.map((para, idx) => {
                     const isActive = idx === activeParagraph;
+                    const normPara = para.normalize('NFC');
+                    const wordRange =
+                      isActive && activeWordRange && activeWordRange.paragraphIndex === idx
+                        ? activeWordRange
+                        : null;
                     return (
                       <p
                         key={idx}
@@ -1988,7 +2109,17 @@ export default function AudiobookApp() {
                             : 'border-transparent hover:border-[#8B5CF6]/40 hover:bg-white/[0.04]'
                         }`}
                       >
-                        {para.normalize('NFC')}
+                        {wordRange ? (
+                          <>
+                            {normPara.slice(0, wordRange.start)}
+                            <span className="bg-[#8B5CF6]/30 text-white rounded px-0.5 transition-colors duration-75">
+                              {normPara.slice(wordRange.start, wordRange.end)}
+                            </span>
+                            {normPara.slice(wordRange.end)}
+                          </>
+                        ) : (
+                          normPara
+                        )}
                         <span className="ml-2 inline-block text-[11px] font-sans font-medium opacity-0 group-hover:opacity-75 text-[#A78BFA] transition-opacity select-none">
                           ▶ Đọc từ đoạn này
                         </span>
@@ -2059,7 +2190,7 @@ export default function AudiobookApp() {
                     Nguồn truyện hỗ trợ
                   </div>
                   <div className="flex flex-wrap gap-2 text-xs">
-                    {['tieuthuyetmang.com', 'truyenfull.vn', 'metruyencv.com', 'tangthuvien.vn', '.txt / .epub'].map((site) => (
+                    {['tieuthuyetmang.com'].map((site) => (
                       <span
                         key={site}
                         className={`px-2.5 py-1 rounded-full border ${

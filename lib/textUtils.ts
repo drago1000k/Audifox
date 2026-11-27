@@ -70,6 +70,7 @@ export interface ParagraphChunkMap {
   chunks: string[];
   paragraphToChunkStart: number[];
   chunkToParagraph: number[];
+  chunkOffsetInParagraph: number[];
   hasTitleChunk: boolean;
 }
 
@@ -82,12 +83,14 @@ export function buildParagraphChunks(
   const chunks: string[] = [];
   const paragraphToChunkStart: number[] = [];
   const chunkToParagraph: number[] = [];
+  const chunkOffsetInParagraph: number[] = [];
 
   const cleanTitle = chapterTitle.trim();
   const hasTitleChunk = cleanTitle.length > 0 && cleanTitle.length <= 500;
   if (hasTitleChunk) {
     chunks.push(cleanTitle);
     chunkToParagraph.push(-1);
+    chunkOffsetInParagraph.push(0);
   }
 
   paragraphs.forEach((para, pIdx) => {
@@ -96,15 +99,21 @@ export function buildParagraphChunks(
     if (subChunks.length === 0) {
       chunks.push(para);
       chunkToParagraph.push(pIdx);
+      chunkOffsetInParagraph.push(0);
     } else {
+      let searchFrom = 0;
       for (const sc of subChunks) {
+        const foundIdx = para.indexOf(sc.slice(0, Math.min(20, sc.length)), searchFrom);
+        const offset = foundIdx >= 0 ? foundIdx : searchFrom;
+        searchFrom = Math.min(para.length, offset + sc.length);
         chunks.push(sc);
         chunkToParagraph.push(pIdx);
+        chunkOffsetInParagraph.push(offset);
       }
     }
   });
 
-  return { chunks, paragraphToChunkStart, chunkToParagraph, hasTitleChunk };
+  return { chunks, paragraphToChunkStart, chunkToParagraph, chunkOffsetInParagraph, hasTitleChunk };
 }
 
 export interface PronunciationRule {
