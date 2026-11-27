@@ -5,8 +5,9 @@ import {
   Play, Pause, SkipForward, SkipBack, Volume2, VolumeX,
   Moon, Sun, BookOpen, Upload, Link2, RotateCcw,
   Timer, Music2, Download, Settings2, X, Check, AlertCircle, Loader2,
-  List
+  List, Lock, ExternalLink, Zap, ClipboardPaste
 } from 'lucide-react';
+import BookmarkletModal from '@/components/BookmarkletModal';
 import {
   splitIntoParagraphs,
   buildParagraphChunks,
@@ -15,7 +16,15 @@ import {
   pitchToHz,
   estimateMinutes,
 } from '@/lib/textUtils';
-import { saveSession, loadSession, clearSession, SessionData } from '@/lib/db';
+import {
+  saveSession,
+  loadSession,
+  clearSession,
+  cacheChapter,
+  getCachedChapter,
+  SessionData,
+  CachedChapter,
+} from '@/lib/db';
 import { startAmbient, AmbientType, AmbientController } from '@/lib/ambientAudio';
 
 type Theme = 'dark' | 'sepia' | 'light';
@@ -38,6 +47,7 @@ export default function AudiobookApp() {
   const [fontFamily, setFontFamily] = useState<FontFamily>('serif');
   const [showSettings, setShowSettings] = useState(false);
   const [showBlacklist, setShowBlacklist] = useState(false);
+  const [showBookmarklet, setShowBookmarklet] = useState(false);
   const [blacklistText, setBlacklistText] = useState('');
   const [inputMode, setInputMode] = useState<'url' | 'text'>('url');
   const [urlInput, setUrlInput] = useState('');
@@ -49,14 +59,28 @@ export default function AudiobookApp() {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [nextUrl, setNextUrl] = useState<string | null>(null);
+  const [prevUrl, setPrevUrl] = useState<string | null>(null);
   const [sourceDomain, setSourceDomain] = useState('');
+  const [isLocked, setIsLocked] = useState(false);
+  const [lockedReason, setLockedReason] = useState<string | null>(null);
+  const [chapterHistory, setChapterHistory] = useState<string[]>([]);
+  const chapterCacheRef = useRef<Map<string, Omit<CachedChapter, 'cachedAt'>>>(new Map());
   const [paragraphs, setParagraphs] = useState<string[]>([]);
   const [chunks, setChunks] = useState<string[]>([]);
   const [paragraphToChunkStart, setParagraphToChunkStart] = useState<number[]>([]);
   const [chunkToParagraph, setChunkToParagraph] = useState<number[]>([]);
 
   // Pre-fetched next chapter
-  const nextChapterRef = useRef<{ title: string; content: string; nextUrl: string | null } | null>(null);
+  const nextChapterRef = useRef<{
+    url: string;
+    title: string;
+    content: string;
+    nextUrl: string | null;
+    prevUrl: string | null;
+    sourceDomain: string;
+    locked?: boolean;
+    reason?: string;
+  } | null>(null);
   const prefetchTriggeredRef = useRef(false);
 
   // --- Playback State ---
@@ -95,6 +119,7 @@ export default function AudiobookApp() {
   // --- Loading/Error State ---
   const [isFetching, setIsFetching] = useState(false);
   const [fetchError, setFetchError] = useState('');
+  const [clipboardImportReady, setClipboardImportReady] = useState(false);
   const [resumeBanner, setResumeBanner] = useState<{ session: SessionData; totalChunks: number } | null>(null);
   const [playlist, setPlaylist] = useState<{ title: string; url: string }[]>([]);
 
@@ -196,8 +221,18 @@ export default function AudiobookApp() {
     return newChunks.length;
   }
 
-  // ========== SCRAPE API ==========
-  async function fetchChapter(url: string): Promise<{ title: string; content: string; nextUrl: string | null; sourceDomain: string }> {
+  // ========== SCRAPE API & CHAPTER CACHE ==========
+  type ScrapeResponse = {
+    title: string;
+    content: string;
+    nextUrl: string | null;
+    prevUrl: string | null;
+    sourceDomain: string;
+    locked?: boolean;
+    reason?: string;
+  };
+
+  async function fetchChapter(url: string): Promise<ScrapeResponse> {
     const res = await fetch('/api/scrape', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -210,26 +245,226 @@ export default function AudiobookApp() {
     return res.json();
   }
 
-  async function handleFetchAndPlay() {
-    if (!urlInput.trim()) return;
+  async function getOrFetchChapter(url: string): Promise<ScrapeResponse> {
+    const memCached = chapterCacheRef.current.get(url);
+    if (memCached) return { ...memCached, locked: false };
+
+    try {
+      const idbCached = await getCachedChapter(url);
+      if (idbCached && Date.now() - idbCached.cachedAt < 24 * 60 * 60 * 1000) {
+        chapterCacheRef.current.set(url, idbCached);
+        return { ...idbCached, locked: false };
+      }
+    } catch {}
+
+    const fresh = await fetchChapter(url);
+    if (!fresh.locked && fresh.content) {
+      const entry = { url, ...fresh };
+      chapterCacheRef.current.set(url, entry);
+      cacheChapter(entry).catch(() => {});
+    }
+    return fresh;
+  }
+
+  async function loadChapterByUrl(targetUrl: string, autoPlay = true, pushHistory = true) {
+    const cleanUrl = targetUrl.trim();
+    if (!cleanUrl) return;
+
+    const currentUrl = urlInput.trim();
+    if (pushHistory && currentUrl && currentUrl !== cleanUrl && (content || isLocked)) {
+      setChapterHistory((prev) =>
+        prev[prev.length - 1] === currentUrl ? prev : [...prev, currentUrl]
+      );
+    }
+
+    setUrlInput(cleanUrl);
     setIsFetching(true);
     setFetchError('');
+    setIsLocked(false);
+    setLockedReason(null);
     stopPlayback();
 
     try {
-      const data = await fetchChapter(urlInput.trim());
+      const data = await getOrFetchChapter(cleanUrl);
       setTitle(data.title);
-      setContent(data.content);
       setNextUrl(data.nextUrl);
+      setPrevUrl(data.prevUrl);
       setSourceDomain(data.sourceDomain);
-      processContent(data.content, 0, data.title);
-      setPlaylist((prev) => [...prev, { title: data.title, url: urlInput.trim() }]);
 
-      setTimeout(() => startPlayback(0), 100);
+      if (data.locked) {
+        setContent('');
+        setParagraphs([]);
+        setChunks([]);
+        chunksRef.current = [];
+        setIsLocked(true);
+        setLockedReason(data.reason || 'LOGIN_REQUIRED');
+        setAutoNext(false);
+        return;
+      }
+
+      setContent(data.content);
+      processContent(data.content, 0, data.title);
+      setPlaylist((prev) =>
+        prev.some((p) => p.url === cleanUrl) ? prev : [...prev, { title: data.title, url: cleanUrl }]
+      );
+
+      if (autoPlay) {
+        setTimeout(() => startPlayback(0), 50);
+      }
     } catch (err: unknown) {
       setFetchError(err instanceof Error ? err.message : 'Failed to fetch chapter');
     } finally {
       setIsFetching(false);
+    }
+  }
+
+  async function handleFetchAndPlay() {
+    await loadChapterByUrl(urlInput, true, true);
+  }
+
+  async function handleNextChapter() {
+    if (!nextUrl || isFetching) return;
+    await loadChapterByUrl(nextUrl, isPlayingRef.current, true);
+  }
+
+  async function handlePrevChapter() {
+    if (isFetching) return;
+    const targetPrev = prevUrl || chapterHistory[chapterHistory.length - 1];
+    if (!targetPrev) return;
+    if (!prevUrl && chapterHistory.length > 0) {
+      setChapterHistory((prev) => prev.slice(0, -1));
+    }
+    await loadChapterByUrl(targetPrev, isPlayingRef.current, false);
+  }
+
+  function importAndPlayChapter(rawTitle: string, rawContent: string, sourceUrl = '') {
+    stopPlayback();
+    setFetchError('');
+    setIsLocked(false);
+    setLockedReason(null);
+    setResumeBanner(null);
+
+    const cleanTitle = (rawTitle || 'Chương đã nhập').normalize('NFC').trim();
+    const cleanBody = rawContent.normalize('NFC');
+    let domain = '';
+    if (sourceUrl) {
+      try {
+        domain = new URL(sourceUrl).hostname;
+      } catch {}
+    }
+
+    setUrlInput(sourceUrl);
+    setTitle(cleanTitle);
+    setContent(cleanBody);
+    setNextUrl(null);
+    setPrevUrl(null);
+    setSourceDomain(domain);
+    processContent(cleanBody, 0, cleanTitle);
+
+    setTimeout(() => startPlayback(0), 60);
+  }
+
+  const importChapterRef = useRef(importAndPlayChapter);
+  importChapterRef.current = importAndPlayChapter;
+  const postMessageReceivedRef = useRef(false);
+
+  function parseClipboardPayload(raw: string): { title: string; content: string; sourceUrl: string } | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && parsed.__audifox === 1 && typeof parsed.content === 'string') {
+          return {
+            title: typeof parsed.title === 'string' ? parsed.title : '',
+            content: parsed.content,
+            sourceUrl: typeof parsed.sourceUrl === 'string' ? parsed.sourceUrl : '',
+          };
+        }
+      } catch {}
+    }
+    const lines = trimmed.split(/\r?\n\r?\n/);
+    const maybeTitle = lines.length > 1 && lines[0].length < 140 ? lines[0].trim() : 'Văn bản từ Clipboard';
+    const body = lines.length > 1 && lines[0].length < 140 ? lines.slice(1).join('\n\n') : trimmed;
+    return { title: maybeTitle, content: body, sourceUrl: '' };
+  }
+
+  // Cross-tab Bookmarklet receiver (postMessage + mobile clipboard fallback)
+  useEffect(() => {
+    function handleMessage(event: MessageEvent) {
+      const data = event.data;
+      if (!data || data.type !== 'AUDIFOX_IMPORT_CHAPTER' || typeof data.content !== 'string') {
+        return;
+      }
+
+      postMessageReceivedRef.current = true;
+      setClipboardImportReady(false);
+      try {
+        (event.source as Window | null)?.postMessage({ type: 'AUDIFOX_ACK' }, '*');
+      } catch {}
+
+      importChapterRef.current(
+        typeof data.title === 'string' ? data.title : '',
+        data.content,
+        typeof data.sourceUrl === 'string' ? data.sourceUrl : ''
+      );
+    }
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  // Mobile bookmarklet fallback: auto-read clipboard when ?from=bookmarklet&clip=1
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('from') !== 'bookmarklet' && params.get('clip') !== '1') return;
+
+    const tryReadClipboard = async () => {
+      if (postMessageReceivedRef.current) return;
+      try {
+        const raw = await navigator.clipboard.readText();
+        const parsed = parseClipboardPayload(raw);
+        if (parsed && parsed.content.length > 20) {
+          setClipboardImportReady(false);
+          window.history.replaceState({}, '', '/');
+          importChapterRef.current(parsed.title, parsed.content, parsed.sourceUrl);
+          return;
+        }
+      } catch {
+        // Mobile Safari/Chrome may require a tap gesture to read clipboard
+        if (!postMessageReceivedRef.current) {
+          setClipboardImportReady(true);
+        }
+      }
+    };
+
+    const timer = setTimeout(tryReadClipboard, 450);
+    const onFocus = () => {
+      if (!postMessageReceivedRef.current) tryReadClipboard();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
+
+  async function handlePasteClipboardAndPlay() {
+    try {
+      const clip = await navigator.clipboard.readText();
+      const parsed = parseClipboardPayload(clip);
+      if (!parsed) {
+        setFetchError('Clipboard trống — hãy copy nội dung chương trước.');
+        return;
+      }
+      setClipboardImportReady(false);
+      if (window.location.search.includes('bookmarklet')) {
+        window.history.replaceState({}, '', '/');
+      }
+      importAndPlayChapter(parsed.title, parsed.content, parsed.sourceUrl);
+    } catch {
+      setFetchError('Trình duyệt chặn đọc Clipboard — hãy dùng tab Văn bản để dán thủ công.');
     }
   }
 
@@ -344,8 +579,9 @@ export default function AudiobookApp() {
     if (!nextUrl || prefetchTriggeredRef.current || nextChapterRef.current) return;
     prefetchTriggeredRef.current = true;
     try {
-      const data = await fetchChapter(nextUrl);
-      nextChapterRef.current = data;
+      const target = nextUrl;
+      const data = await getOrFetchChapter(target);
+      nextChapterRef.current = { url: target, ...data };
     } catch {}
   }
 
@@ -419,10 +655,34 @@ export default function AudiobookApp() {
     const next = nextChapterRef.current;
     if (!next) return;
 
+    const currentUrl = urlInput.trim();
+    if (currentUrl && currentUrl !== next.url) {
+      setChapterHistory((prev) => (prev[prev.length - 1] === currentUrl ? prev : [...prev, currentUrl]));
+    }
+    setUrlInput(next.url);
     setTitle(next.title);
-    setContent(next.content);
     setNextUrl(next.nextUrl);
-    setPlaylist((prev) => [...prev, { title: next.title, url: nextUrl || '' }]);
+    setPrevUrl(next.prevUrl);
+    setSourceDomain(next.sourceDomain);
+
+    if (next.locked) {
+      stopPlayback();
+      setContent('');
+      setParagraphs([]);
+      setChunks([]);
+      chunksRef.current = [];
+      setIsLocked(true);
+      setLockedReason(next.reason || 'LOGIN_REQUIRED');
+      setAutoNext(false);
+      return;
+    }
+
+    setIsLocked(false);
+    setLockedReason(null);
+    setContent(next.content);
+    setPlaylist((prev) =>
+      prev.some((p) => p.url === next.url) ? prev : [...prev, { title: next.title, url: next.url }]
+    );
     processContent(next.content, 0, next.title);
 
     // Start playing after state settles
@@ -675,7 +935,7 @@ export default function AudiobookApp() {
   };
 
   return (
-    <div className={`min-h-screen ${themeClasses[theme]} transition-colors duration-300`}>
+    <div className={`min-h-screen overflow-x-hidden ${themeClasses[theme]} transition-colors duration-300`}>
       {/* Hidden audio element managed by ref */}
 
       {/* ===== RESUME BANNER ===== */}
@@ -711,17 +971,35 @@ export default function AudiobookApp() {
       <header className={`sticky top-0 z-40 border-b ${panelClasses[theme]} player-bar`}>
         <div className="max-w-5xl mx-auto px-4 py-3">
           {/* Logo + Title row */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <BookOpen className="text-indigo-500" size={22} />
+          <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <BookOpen className="text-indigo-500 shrink-0" size={22} />
               <span className="font-bold text-lg tracking-tight">Audifox</span>
               {title && (
-                <span className={`text-sm truncate max-w-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                <span className={`text-sm truncate max-w-[140px] sm:max-w-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
                   — {title}
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+              {/* 1-Click Bookmarklet Button */}
+              <button
+                onClick={() => setShowBookmarklet(true)}
+                className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-amber-400/60 transition-colors`}
+                title="Cài đặt nút đọc 1-Click (Bookmarklet)"
+              >
+                <Zap size={14} className="text-amber-400" />
+                <span className="hidden sm:inline">Nút đọc 1-Click</span>
+              </button>
+              {/* Clipboard Quick Play */}
+              <button
+                onClick={handlePasteClipboardAndPlay}
+                className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-indigo-400/60 transition-colors`}
+                title="Dán từ Clipboard & Phát ngay"
+              >
+                <ClipboardPaste size={14} className="text-indigo-400" />
+                <span className="hidden sm:inline">Dán & Phát ngay</span>
+              </button>
               {/* Theme toggle */}
               <button onClick={() => setTheme(t => t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark')}
                 className={`p-2 rounded-lg ${panelClasses[theme]} border`} title="Đổi theme">
@@ -756,14 +1034,14 @@ export default function AudiobookApp() {
 
           {/* URL Input */}
           {inputMode === 'url' && (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap sm:flex-nowrap gap-2">
               <input
                 type="url"
                 value={urlInput}
                 onChange={(e) => setUrlInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleFetchAndPlay()}
                 placeholder="Dán URL chương truyện... (vd: truyenfull.vn/truyen/chuong-1)"
-                className={`flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900 placeholder-amber-400' : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'}`}
+                className={`min-w-0 flex-1 basis-full sm:basis-auto px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900 placeholder-amber-400' : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'}`}
               />
               <button
                 onClick={handleFetchAndPlay}
@@ -772,13 +1050,24 @@ export default function AudiobookApp() {
                 {isFetching ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
                 {isFetching ? 'Đang tải...' : 'Phát'}
               </button>
+              {(prevUrl || chapterHistory.length > 0) && (
+                <button
+                  onClick={handlePrevChapter}
+                  disabled={isFetching}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${panelClasses[theme]} disabled:opacity-50 flex items-center gap-1 transition-colors`}
+                  title="Chương trước"
+                >
+                  <SkipBack size={16} />
+                  Trước
+                </button>
+              )}
               {nextUrl && (
-                <button onClick={async () => {
-                  setUrlInput(nextUrl);
-                  setTimeout(() => handleFetchAndPlay(), 50);
-                }}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${panelClasses[theme]} flex items-center gap-1`}
-                  title="Chương tiếp theo">
+                <button
+                  onClick={handleNextChapter}
+                  disabled={isFetching}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${panelClasses[theme]} disabled:opacity-50 flex items-center gap-1 transition-colors`}
+                  title="Chương tiếp theo"
+                >
                   <SkipForward size={16} />
                   Tiếp
                 </button>
@@ -816,13 +1105,26 @@ export default function AudiobookApp() {
               {fetchError}
             </div>
           )}
+
+          {/* Mobile Bookmarklet Clipboard Tap Prompt */}
+          {clipboardImportReady && (
+            <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-indigo-600/20 border border-indigo-500/40 px-3 py-2 text-xs sm:text-sm">
+              <span>Đã nhận chương từ Bookmarklet — chạm để đọc ngay:</span>
+              <button
+                onClick={handlePasteClipboardAndPlay}
+                className="px-3 py-1 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shrink-0 flex items-center gap-1"
+              >
+                <ClipboardPaste size={13} /> Dán & Phát ngay
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
       {/* ===== SETTINGS PANEL ===== */}
       {showSettings && (
-        <div className={`sticky top-[9rem] z-30 border-b ${panelClasses[theme]}`}>
-          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap gap-4 items-center">
+        <div className={`border-b ${panelClasses[theme]}`}>
+          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap gap-3 sm:gap-4 items-center">
             {/* Font size */}
             <div className="flex items-center gap-2 text-sm">
               <span className="opacity-60">Cỡ chữ</span>
@@ -856,8 +1158,8 @@ export default function AudiobookApp() {
 
       {/* ===== BLACKLIST MODAL ===== */}
       {showBlacklist && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className={`w-full max-w-md rounded-xl p-6 shadow-2xl ${theme === 'dark' ? 'bg-gray-900 text-white' : theme === 'sepia' ? 'bg-amber-50 text-amber-900' : 'bg-white text-gray-900'}`}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 sm:p-4">
+          <div className={`w-full max-w-md max-h-[85vh] overflow-y-auto rounded-xl p-4 sm:p-6 shadow-2xl ${theme === 'dark' ? 'bg-gray-900 text-white' : theme === 'sepia' ? 'bg-amber-50 text-amber-900' : 'bg-white text-gray-900'}`}>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold">Danh sách đen (watermarks, từ cần lọc)</h3>
               <button onClick={() => setShowBlacklist(false)}><X size={18} /></button>
@@ -883,7 +1185,7 @@ export default function AudiobookApp() {
       )}
 
       {/* ===== MAIN CONTENT ===== */}
-      <main className="max-w-3xl mx-auto px-4 sm:px-6 pb-52 pt-8">
+      <main className={`max-w-3xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 ${chunks.length > 0 ? 'pb-56 sm:pb-44' : 'pb-16'}`}>
         {/* Playlist sidebar */}
         {showPlaylist && playlist.length > 0 && (
           <div className={`mb-6 p-4 rounded-xl border ${panelClasses[theme]}`}>
@@ -892,7 +1194,7 @@ export default function AudiobookApp() {
               {playlist.map((item, idx) => (
                 <li key={idx} className="text-sm flex items-center gap-2">
                   <span className="opacity-40">{idx + 1}.</span>
-                  <button onClick={() => { setUrlInput(item.url); handleFetchAndPlay(); }}
+                  <button onClick={() => loadChapterByUrl(item.url, true, true)}
                     className="hover:text-indigo-500 text-left truncate">{item.title || item.url}</button>
                 </li>
               ))}
@@ -902,10 +1204,10 @@ export default function AudiobookApp() {
 
         {/* Chapter title */}
         {title && (
-          <div className="mb-8 pb-4 border-b border-current/10 flex items-start justify-between gap-4">
+          <div className="mb-6 sm:mb-8 pb-4 border-b border-current/10 flex flex-wrap sm:flex-nowrap items-start justify-between gap-3">
             <h1
               onClick={() => seekToChunk(0, true)}
-              className={`font-bold leading-snug cursor-pointer rounded-lg transition-colors ${fontFamilyMap[fontFamily]} ${
+              className={`min-w-0 flex-1 break-words font-bold leading-snug cursor-pointer rounded-lg transition-colors ${fontFamilyMap[fontFamily]} ${
                 activeParagraph === -1 && currentChunk === 0 && isPlaying
                   ? 'text-indigo-400'
                   : ''
@@ -934,8 +1236,54 @@ export default function AudiobookApp() {
           </div>
         )}
 
-        {/* Chapter text as clean, spaced paragraphs */}
-        {paragraphs.length > 0 ? (
+        {/* Locked / Login Required State */}
+        {isLocked ? (
+          <div className={`rounded-2xl border p-8 text-center space-y-4 ${panelClasses[theme]}`}>
+            <div className="mx-auto w-12 h-12 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center">
+              <Lock size={24} />
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="text-lg font-bold">Chương này đang bị khóa</h2>
+              <p className="text-sm opacity-75 max-w-md mx-auto">
+                {lockedReason === 'LOGIN_REQUIRED'
+                  ? `Trang ${sourceDomain || 'nguồn'} yêu cầu đăng nhập tài khoản để đọc chương này. Tự động chuyển chương đã được tạm dừng.`
+                  : 'Không thể trích xuất nội dung chương này.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+              {urlInput && (
+                <a
+                  href={urlInput}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <ExternalLink size={15} /> Mở trang gốc để đăng nhập
+                </a>
+              )}
+              <button
+                onClick={() => setShowBookmarklet(true)}
+                className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-black text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
+              >
+                <Zap size={15} /> Nút đọc 1-Click (Bookmarklet)
+              </button>
+              <button
+                onClick={handlePasteClipboardAndPlay}
+                className={`px-4 py-2 rounded-lg border text-sm font-medium ${panelClasses[theme]} inline-flex items-center gap-1.5`}
+              >
+                <ClipboardPaste size={15} /> Dán & Phát ngay
+              </button>
+              {urlInput && (
+                <button
+                  onClick={() => loadChapterByUrl(urlInput, false, false)}
+                  className={`px-3 py-2 rounded-lg border text-sm font-medium ${panelClasses[theme]} inline-flex items-center gap-1`}
+                >
+                  <RotateCcw size={14} /> Thử lại
+                </button>
+              )}
+            </div>
+          </div>
+        ) : paragraphs.length > 0 ? (
           <article
             ref={contentRef}
             className={`max-w-[72ch] mx-auto space-y-5 leading-[1.85] ${fontFamilyMap[fontFamily]}`}
@@ -948,7 +1296,7 @@ export default function AudiobookApp() {
                   key={idx}
                   ref={(el) => { paragraphRefs.current[idx] = el; }}
                   onClick={() => handleParagraphClick(idx)}
-                  className={`group relative cursor-pointer rounded-lg px-3.5 py-2.5 border-l-2 transition-all duration-200 ${
+                  className={`group relative cursor-pointer break-words rounded-lg px-3 sm:px-3.5 py-2.5 border-l-2 transition-all duration-200 ${
                     isActive
                       ? theme === 'dark'
                         ? 'border-indigo-400 bg-indigo-500/15 text-indigo-100 shadow-sm'
@@ -977,12 +1325,12 @@ export default function AudiobookApp() {
 
       {/* ===== BOTTOM PLAYER BAR ===== */}
       {chunks.length > 0 && (
-        <div className={`fixed bottom-0 inset-x-0 z-40 border-t ${panelClasses[theme]} player-bar`}>
+        <div className={`fixed bottom-0 inset-x-0 z-40 border-t ${panelClasses[theme]} player-bar pb-[env(safe-area-inset-bottom)]`}>
           {/* Interactive Seek / Scrubbing Bar */}
-          <div className="max-w-5xl mx-auto px-4 pt-2.5">
-            <div className="flex items-center gap-3">
-              <span className="text-xs font-medium tabular-nums opacity-70 whitespace-nowrap">
-                Đoạn {currentChunk + 1} / {chunks.length}
+          <div className="max-w-5xl mx-auto px-3 sm:px-4 pt-2">
+            <div className="flex items-center gap-2 sm:gap-3">
+              <span className="text-[11px] sm:text-xs font-medium tabular-nums opacity-70 whitespace-nowrap">
+                Đoạn {currentChunk + 1}/{chunks.length}
               </span>
               <input
                 type="range"
@@ -991,34 +1339,36 @@ export default function AudiobookApp() {
                 value={currentChunk}
                 onChange={(e) => seekToChunk(parseInt(e.target.value, 10))}
                 aria-label="Tua tiến độ đọc"
-                className="w-full h-1.5 accent-indigo-500 cursor-pointer"
+                className="min-w-0 flex-1 h-1.5 accent-indigo-500 cursor-pointer"
               />
-              <span className="text-xs font-medium tabular-nums opacity-70 whitespace-nowrap">
+              <span className="text-[11px] sm:text-xs font-medium tabular-nums opacity-70 whitespace-nowrap">
                 {Math.round(((currentChunk + 1) / chunks.length) * 100)}% · ~{estLeft}p
               </span>
             </div>
           </div>
 
-          <div className="max-w-5xl mx-auto px-4 py-2.5">
+          <div className="max-w-5xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5">
             {/* Row 1: Main controls */}
-            <div className="flex items-center gap-3 mb-2">
-              <button onClick={skipBack} className="p-1.5 rounded-full hover:bg-white/10 transition-colors">
-                <SkipBack size={20} />
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap mb-2">
+              <button onClick={skipBack} className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0" aria-label="Đoạn trước">
+                <SkipBack size={18} />
               </button>
               <button
                 onClick={togglePlayPause}
-                className="p-3 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-lg">
-                {isPlaying ? <Pause size={22} /> : <Play size={22} />}
+                className="p-2.5 sm:p-3 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-lg shrink-0"
+                aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
+              >
+                {isPlaying ? <Pause size={20} /> : <Play size={20} />}
               </button>
-              <button onClick={skipNext} className="p-1.5 rounded-full hover:bg-white/10 transition-colors">
-                <SkipForward size={20} />
+              <button onClick={skipNext} className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0" aria-label="Đoạn tiếp">
+                <SkipForward size={18} />
               </button>
 
               {/* Voice selector */}
               <select
                 value={voice}
                 onChange={e => setVoice(e.target.value)}
-                className={`text-sm rounded-lg border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
+                className={`min-w-0 max-w-[135px] sm:max-w-none text-xs sm:text-sm rounded-lg border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
                 {VOICES.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}
               </select>
 
@@ -1026,7 +1376,7 @@ export default function AudiobookApp() {
               <select
                 value={speed}
                 onChange={e => setSpeed(parseFloat(e.target.value))}
-                className={`text-sm rounded-lg border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
+                className={`text-xs sm:text-sm rounded-lg border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
                 {SPEED_OPTIONS.map(s => <option key={s} value={s}>{s}x</option>)}
               </select>
 
@@ -1037,7 +1387,7 @@ export default function AudiobookApp() {
             </div>
 
             {/* Row 2: Volume + Auto-next + Sleep timer + Ambient + Export */}
-            <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
               {/* Volume */}
               <div className="flex items-center gap-1.5">
                 <button onClick={() => setVolume(v => v > 0 ? 0 : 0.9)}>
@@ -1096,6 +1446,12 @@ export default function AudiobookApp() {
           </div>
         </div>
       )}
+      {/* ===== BOOKMARKLET MODAL ===== */}
+      <BookmarkletModal
+        isOpen={showBookmarklet}
+        onClose={() => setShowBookmarklet(false)}
+        theme={theme}
+      />
     </div>
   );
 }

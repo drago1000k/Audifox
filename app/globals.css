@@ -13,9 +13,9 @@
   --color-sepia-800: #3a2810;
   --color-sepia-900: #1a1008;
 
-  --font-family-serif: "Times New Roman", "Segoe UI", system-ui, serif;
-  --font-family-sans: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
-  --font-family-mono: "Consolas", "Courier New", monospace;
+  --font-serif: "Times New Roman", "Segoe UI", system-ui, serif;
+  --font-sans: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  --font-mono: "Consolas", "Courier New", monospace;
 }
 
 /* ===== CSS CUSTOM PROPERTIES FOR THEME ===== */
@@ -47,9 +47,11 @@ html.sepia {
   --muted: #8c6a40;
 }
 
+html,
 body {
   background-color: var(--bg);
   color: var(--fg);
+  overflow-x: hidden;
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 

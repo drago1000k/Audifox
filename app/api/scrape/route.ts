@@ -43,6 +43,28 @@ const NEXT_CHAPTER_CLASSES = [
   '[rel="next"]',
 ];
 
+// Vietnamese previous-chapter patterns
+const PREV_CHAPTER_PATTERNS = [
+  /chương\s+trước/i,
+  /chương\s+cũ/i,
+  /trang\s+trước/i,
+  /^trước$/i,
+  /prev(ious)?(\s+chapter)?/i,
+  /<</,
+];
+
+const PREV_CHAPTER_IDS = ['#prev_chap', '#prev-chap', '#prevchapter', '#prev'];
+const PREV_CHAPTER_CLASSES = [
+  '.prev-chap',
+  '.prev_chap',
+  '.prevchap',
+  '.chapter-prev',
+  '.btn-prev',
+  '.prev-chapter',
+  '.chapter-nav-prev',
+  '[rel="prev"]',
+];
+
 // Vietnamese novel content selectors (priority order)
 const CONTENT_SELECTORS = [
   '#chapter-c',
@@ -228,12 +250,21 @@ function findTitle($: cheerio.CheerioAPI): string {
   return '';
 }
 
-function findNextUrl($: cheerio.CheerioAPI, baseUrl: string): string | null {
+function findNavUrl(
+  $: cheerio.CheerioAPI,
+  baseUrl: string,
+  ids: string[],
+  classes: string[],
+  patterns: RegExp[]
+): string | null {
   // Try ID/class selectors first
-  for (const sel of [...NEXT_CHAPTER_IDS, ...NEXT_CHAPTER_CLASSES]) {
+  for (const sel of [...ids, ...classes]) {
     const href = $(sel).attr('href');
-    if (href) {
-      try { return new URL(href, baseUrl).href; } catch {}
+    if (href && href !== '#' && !href.startsWith('javascript')) {
+      try {
+        const resolved = new URL(href, baseUrl).href;
+        if (resolved !== baseUrl) return resolved;
+      } catch {}
     }
   }
 
@@ -246,18 +277,60 @@ function findNextUrl($: cheerio.CheerioAPI, baseUrl: string): string | null {
 
     const text = $(el).text().trim();
     const title = $(el).attr('title') || '';
-    const combined = text + ' ' + title;
+    const combined = `${text} ${title}`.trim();
 
-    if (NEXT_CHAPTER_PATTERNS.some((p) => p.test(combined))) {
-      try { found = new URL(href, baseUrl).href; } catch {}
+    if (patterns.some((p) => p.test(combined))) {
+      try {
+        const resolved = new URL(href, baseUrl).href;
+        if (resolved !== baseUrl) found = resolved;
+      } catch {}
     }
   });
 
   return found;
 }
 
+function findNextUrl($: cheerio.CheerioAPI, baseUrl: string): string | null {
+  return findNavUrl($, baseUrl, NEXT_CHAPTER_IDS, NEXT_CHAPTER_CLASSES, NEXT_CHAPTER_PATTERNS);
+}
+
+function findPrevUrl($: cheerio.CheerioAPI, baseUrl: string): string | null {
+  return findNavUrl($, baseUrl, PREV_CHAPTER_IDS, PREV_CHAPTER_CLASSES, PREV_CHAPTER_PATTERNS);
+}
+
 // In-memory cookie jar keyed by hostname
 const cookieJar = new Map<string, string>();
+
+const LOCKED_PATTERNS = [
+  /chương này đang bị khóa/i,
+  /đăng nhập để đọc tiếp/i,
+  /vui lòng đăng nhập để (đọc|xem)/i,
+  /bạn cần đăng nhập/i,
+];
+
+function mergeCookies(...parts: (string | undefined)[]): string {
+  const map = new Map<string, string>();
+  for (const part of parts) {
+    if (!part) continue;
+    for (const pair of part.split(';')) {
+      const idx = pair.indexOf('=');
+      if (idx > 0) {
+        const k = pair.slice(0, idx).trim();
+        const v = pair.slice(idx + 1).trim();
+        if (k) map.set(k, v);
+      }
+    }
+  }
+  return Array.from(map.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
+}
+
+function isLockedChapter(rawBodyText: string, cleanedContent: string): boolean {
+  if (LOCKED_PATTERNS.some((p) => p.test(cleanedContent))) return true;
+  if (cleanedContent.length < 80 && LOCKED_PATTERNS.some((p) => p.test(rawBodyText))) return true;
+  return cleanedContent.trim().length < 40;
+}
 
 function parseSetCookies(res: Response): string {
   const headersObj = res.headers as Headers & { getSetCookie?: () => string[] };
@@ -323,18 +396,22 @@ async function unlockAccessGate(
 
 export async function POST(req: NextRequest) {
   try {
-    const { url } = await req.json();
+    const { url, cookie: userCookie } = await req.json();
 
     if (!url || typeof url !== 'string') {
       return NextResponse.json({ error: 'URL is required' }, { status: 400 });
     }
 
+    const customCookie = typeof userCookie === 'string' ? userCookie.trim() : '';
     const targetUrl = new URL(url);
-    const buildHeaders = (cookie?: string): Record<string, string> => ({
-      ...BROWSER_HEADERS,
-      Referer: targetUrl.origin,
-      ...(cookie ? { Cookie: cookie } : {}),
-    });
+    const buildHeaders = (cookie?: string): Record<string, string> => {
+      const merged = mergeCookies(cookie, customCookie);
+      return {
+        ...BROWSER_HEADERS,
+        Referer: targetUrl.origin,
+        ...(merged ? { Cookie: merged } : {}),
+      };
+    };
 
     const cachedCookie = cookieJar.get(targetUrl.hostname);
     let res = await fetch(url, {
@@ -387,12 +464,33 @@ export async function POST(req: NextRequest) {
     $('[class*="social"], [id*="social"]').remove();
 
     const title = findTitle($);
+    const rawBodyText = $('body').text();
     const rawContent = findBestContentElement($, url);
     const content = cleanText(rawContent, title);
     const nextUrl = findNextUrl($, url);
+    const prevUrl = findPrevUrl($, url);
     const sourceDomain = targetUrl.hostname;
 
-    return NextResponse.json({ title, content, nextUrl, sourceDomain });
+    if (isLockedChapter(rawBodyText, content)) {
+      return NextResponse.json({
+        title,
+        content: '',
+        nextUrl,
+        prevUrl,
+        sourceDomain,
+        locked: true,
+        reason: 'LOGIN_REQUIRED',
+      });
+    }
+
+    return NextResponse.json({
+      title,
+      content,
+      nextUrl,
+      prevUrl,
+      sourceDomain,
+      locked: false,
+    });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });
