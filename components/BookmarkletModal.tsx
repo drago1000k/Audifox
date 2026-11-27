@@ -140,7 +140,7 @@ export default function BookmarkletModal({ isOpen, onClose, theme }: Bookmarklet
       <div
         className={`w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl p-4 sm:p-6 shadow-2xl border ${
           theme === 'dark'
-            ? 'bg-gray-900 border-gray-800 text-white'
+            ? 'bg-[#222434] border-white/10 text-[#F3F4F6]'
             : theme === 'sepia'
               ? 'bg-amber-50 border-amber-300 text-amber-950'
               : 'bg-white border-gray-200 text-gray-900'

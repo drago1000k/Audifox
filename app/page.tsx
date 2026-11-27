@@ -6,7 +6,7 @@ import {
   Moon, Sun, BookOpen, Upload, Link2, RotateCcw,
   Timer, Download, Settings2, X, Check, AlertCircle, Loader2,
   List, Lock, ExternalLink, Zap, ClipboardPaste, BookMarked, ListOrdered,
-  LogIn, LogOut, Cloud
+  LogIn, LogOut, Menu
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import BookmarkletModal from '@/components/BookmarkletModal';
@@ -71,6 +71,7 @@ export default function AudiobookApp() {
   const [showPronunciation, setShowPronunciation] = useState(false);
   const [showBookshelf, setShowBookshelf] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null);
   const [oledSleepMode, setOledSleepMode] = useState(false);
@@ -1227,13 +1228,13 @@ export default function AudiobookApp() {
   const estLeft = estimateMinutes(totalChars - doneChars, speed);
 
   const themeClasses: Record<Theme, string> = {
-    dark: 'bg-gray-950 text-gray-100',
+    dark: 'bg-[#0E101A] text-[#F3F4F6]',
     sepia: 'bg-amber-50 text-amber-900',
     light: 'bg-white text-gray-900',
   };
 
   const panelClasses: Record<Theme, string> = {
-    dark: 'bg-gray-900 border-gray-800',
+    dark: 'bg-[#222434] border-white/10',
     sepia: 'bg-amber-100 border-amber-300',
     light: 'bg-gray-50 border-gray-200',
   };
@@ -1279,108 +1280,151 @@ export default function AudiobookApp() {
 
       {/* ===== TOP BAR ===== */}
       <header className={`sticky top-0 z-40 border-b ${panelClasses[theme]} player-bar`}>
-        <div className="max-w-5xl mx-auto px-4 py-3">
-          {/* Logo + Title row */}
-          <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
-            <div className="flex items-center gap-2 min-w-0">
-              <BookOpen className="text-indigo-500 shrink-0" size={22} />
-              <span className="font-bold text-lg tracking-tight">Audifox</span>
-              {title && (
-                <span className={`text-sm truncate max-w-[140px] sm:max-w-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
-                  — {title}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-              {/* Bookshelf */}
-              <button
-                onClick={() => setShowBookshelf(true)}
-                className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-indigo-400/60 transition-colors`}
-                title="Tủ truyện"
-              >
-                <BookMarked size={14} className="text-indigo-400" />
-                <span className="hidden sm:inline">Tủ truyện</span>
-                {bookshelfItems.length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white text-[10px] leading-4">
-                    {bookshelfItems.length}
+        <div className="max-w-5xl mx-auto px-3 sm:px-5 py-3">
+          {/* Row 1: Fox Logo + Desktop Menu + Account */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <button
+                  onClick={() => setShowMobileMenu((v) => !v)}
+                  className={`sm:hidden p-2 rounded-xl border ${panelClasses[theme]} shrink-0`}
+                  aria-label="Menu"
+                >
+                  {showMobileMenu ? <X size={18} /> : <Menu size={18} />}
+                </button>
+                <img
+                  src="/logo.png"
+                  alt="Audifox"
+                  className="w-7 h-7 rounded-lg object-contain shrink-0"
+                />
+                <span className="font-bold text-lg tracking-tight">Audifox</span>
+                {title && (
+                  <span className={`hidden lg:inline text-xs truncate max-w-[200px] ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                    — {title}
                   </span>
                 )}
-              </button>
-              {/* 1-Click Bookmarklet Button */}
-              <button
-                onClick={() => setShowBookmarklet(true)}
-                className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-amber-400/60 transition-colors`}
-                title="Cài đặt nút đọc 1-Click (Bookmarklet)"
-              >
-                <Zap size={14} className="text-amber-400" />
-                <span className="hidden sm:inline">Nút đọc 1-Click</span>
-              </button>
-              {/* Clipboard Quick Play */}
-              <button
-                onClick={handlePasteClipboardAndPlay}
-                className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-indigo-400/60 transition-colors`}
-                title="Dán từ Clipboard & Phát ngay"
-              >
-                <ClipboardPaste size={14} className="text-indigo-400" />
-                <span className="hidden sm:inline">Dán & Phát ngay</span>
-              </button>
-              {/* OLED Sleep Mode */}
-              {chunks.length > 0 && (
+              </div>
+
+              {/* Mobile quick actions right side of logo row */}
+              <div className="flex sm:hidden items-center gap-1.5">
                 <button
-                  onClick={() => setOledSleepMode(true)}
-                  className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-indigo-400/60 transition-colors`}
-                  title="Chế độ ngủ OLED"
+                  onClick={() => setShowBookshelf(true)}
+                  className={`px-2.5 py-1.5 rounded-xl border ${panelClasses[theme]} text-xs font-medium flex items-center gap-1`}
+                  title="Tủ truyện"
                 >
-                  <Moon size={14} className="text-purple-400" />
-                  <span className="hidden md:inline">Ngủ (OLED)</span>
-                </button>
-              )}
-              {/* Theme toggle */}
-              <button onClick={() => setTheme(t => t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark')}
-                className={`p-2 rounded-lg ${panelClasses[theme]} border`} title="Đổi theme">
-                {theme === 'dark' ? <Moon size={16} /> : theme === 'sepia' ? <BookOpen size={16} /> : <Sun size={16} />}
-              </button>
-              {/* Settings */}
-              <button onClick={() => setShowSettings(!showSettings)}
-                className={`p-2 rounded-lg ${panelClasses[theme]} border`} title="Cài đặt">
-                <Settings2 size={16} />
-              </button>
-              {/* Playlist */}
-              {playlist.length > 0 && (
-                <button onClick={() => setShowPlaylist(!showPlaylist)}
-                  className={`p-2 rounded-lg ${panelClasses[theme]} border`} title="Danh sách chương">
-                  <List size={16} />
-                </button>
-              )}
-              {/* Hybrid Auth Trigger / User Badge */}
-              {user ? (
-                <div className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs ${panelClasses[theme]}`}>
-                  {user.photoURL ? (
-                    <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full shrink-0" />
-                  ) : (
-                    <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
-                      {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                  <BookMarked size={14} className="text-[#8B5CF6]" />
+                  {bookshelfItems.length > 0 && (
+                    <span className="px-1.5 rounded-full bg-[#8B5CF6] text-white text-[10px]">
+                      {bookshelfItems.length}
                     </span>
                   )}
-                  <span className="hidden md:inline max-w-[110px] truncate font-medium">
-                    {user.displayName || user.email}
-                  </span>
-                  <span className="hidden sm:inline-flex items-center gap-0.5 text-[10px] text-emerald-400">
-                    <Cloud size={11} /> Đã đồng bộ
-                  </span>
+                </button>
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className={`p-2 rounded-xl border ${panelClasses[theme]}`}
+                  title="Cài đặt"
+                >
+                  <Settings2 size={16} />
+                </button>
+              </div>
+            </div>
+
+            {/* Desktop Menu Items + Account */}
+            <div className="flex items-center justify-between sm:justify-end gap-2 flex-wrap">
+              <div className="hidden sm:flex items-center gap-1.5">
+                <button
+                  onClick={() => setShowBookshelf(true)}
+                  className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
+                  title="Tủ truyện"
+                >
+                  <BookMarked size={14} className="text-[#8B5CF6]" />
+                  <span>Tủ truyện</span>
+                  {bookshelfItems.length > 0 && (
+                    <span className="px-1.5 rounded-full bg-[#8B5CF6] text-white text-[10px] leading-4">
+                      {bookshelfItems.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => setShowBookmarklet(true)}
+                  className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-amber-400/60 transition-colors`}
+                  title="Nút đọc 1-Click (Bookmarklet)"
+                >
+                  <Zap size={14} className="text-amber-400" />
+                  <span>Nút đọc 1-Click</span>
+                </button>
+                <button
+                  onClick={handlePasteClipboardAndPlay}
+                  className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
+                  title="Dán & Phát ngay"
+                >
+                  <ClipboardPaste size={14} className="text-[#A78BFA]" />
+                  <span>Dán & Phát ngay</span>
+                </button>
+                {chunks.length > 0 && (
+                  <button
+                    onClick={() => setOledSleepMode(true)}
+                    className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
+                    title="Chế độ ngủ (OLED)"
+                  >
+                    <Moon size={14} className="text-[#A78BFA]" />
+                    <span className="hidden md:inline">Chế độ ngủ (OLED)</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setTheme(t => t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark')}
+                  className={`p-2 rounded-xl ${panelClasses[theme]} border`}
+                  title="Đổi theme"
+                >
+                  {theme === 'dark' ? <Moon size={15} /> : theme === 'sepia' ? <BookOpen size={15} /> : <Sun size={15} />}
+                </button>
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className={`p-2 rounded-xl ${panelClasses[theme]} border`}
+                  title="Cài đặt"
+                >
+                  <Settings2 size={15} />
+                </button>
+                {playlist.length > 0 && (
+                  <button
+                    onClick={() => setShowPlaylist(!showPlaylist)}
+                    className={`p-2 rounded-xl ${panelClasses[theme]} border`}
+                    title="Danh sách chương"
+                  >
+                    <List size={15} />
+                  </button>
+                )}
+              </div>
+
+              {/* Account Section (Refined Avatar + Sync Badge / Pill Login) */}
+              {user ? (
+                <div className={`w-full sm:w-auto min-h-[40px] flex items-center justify-between sm:justify-start gap-2 px-3 py-1.5 rounded-full border text-xs ${panelClasses[theme]}`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full shrink-0 object-cover" />
+                    ) : (
+                      <span className="w-5 h-5 rounded-full bg-gradient-to-br from-[#8B5CF6] to-[#7C5DFA] text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                        {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                      </span>
+                    )}
+                    <span className="truncate max-w-[180px] sm:max-w-[170px] text-[#F3F4F6] font-medium tracking-tight">
+                      {user.displayName || user.email}
+                      <span className="text-[#34D399] font-normal"> • ✓ Đã đồng bộ</span>
+                    </span>
+                  </div>
                   <button
                     onClick={() => signOutUser()}
-                    className="px-1.5 py-0.5 rounded hover:bg-red-500/15 text-red-400 font-medium inline-flex items-center gap-1"
+                    className="px-2 py-1 rounded-full hover:bg-red-500/15 text-[#9CA3AF] hover:text-red-400 text-[11px] font-medium inline-flex items-center gap-1 shrink-0"
                     title="Đăng xuất"
                   >
-                    <LogOut size={12} />
-                    <span className="hidden sm:inline">Đăng xuất</span>
+                    <LogOut size={11} />
+                    <span>Đăng xuất</span>
                   </button>
                 </div>
               ) : (
                 <button
                   onClick={() => setShowAuthModal(true)}
-                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1 transition-colors shrink-0"
+                  className="w-full sm:w-auto min-h-[40px] px-4 py-1.5 rounded-full bg-gradient-to-r from-[#8B5CF6] to-[#7C5DFA] hover:opacity-95 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-opacity shadow-md shrink-0"
                   title="Đăng nhập"
                 >
                   <LogIn size={13} />
@@ -1389,6 +1433,45 @@ export default function AudiobookApp() {
               )}
             </div>
           </div>
+
+          {/* Mobile Hamburger Drawer */}
+          {showMobileMenu && (
+            <div className={`sm:hidden mb-3 p-2.5 rounded-2xl border grid grid-cols-2 gap-2 ${panelClasses[theme]}`}>
+              <button
+                onClick={() => { setShowMobileMenu(false); setShowBookmarklet(true); }}
+                className="px-3 py-2 rounded-xl border border-current/15 text-xs font-medium flex items-center gap-1.5"
+              >
+                <Zap size={14} className="text-amber-400 shrink-0" /> Nút đọc 1-Click
+              </button>
+              <button
+                onClick={() => { setShowMobileMenu(false); handlePasteClipboardAndPlay(); }}
+                className="px-3 py-2 rounded-xl border border-current/15 text-xs font-medium flex items-center gap-1.5"
+              >
+                <ClipboardPaste size={14} className="text-[#A78BFA] shrink-0" /> Dán & Phát ngay
+              </button>
+              <button
+                onClick={() => { setShowMobileMenu(false); setShowPronunciation(true); }}
+                className="px-3 py-2 rounded-xl border border-current/15 text-xs font-medium flex items-center gap-1.5"
+              >
+                🗣 Từ điển phát âm
+              </button>
+              <button
+                onClick={() => setTheme(t => t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark')}
+                className="px-3 py-2 rounded-xl border border-current/15 text-xs font-medium flex items-center gap-1.5"
+              >
+                {theme === 'dark' ? <Moon size={14} /> : theme === 'sepia' ? <BookOpen size={14} /> : <Sun size={14} />}
+                Theme: {theme === 'dark' ? 'Tối' : theme === 'sepia' ? 'Sepia' : 'Sáng'}
+              </button>
+              {chunks.length > 0 && (
+                <button
+                  onClick={() => { setShowMobileMenu(false); setOledSleepMode(true); }}
+                  className="col-span-2 px-3 py-2 rounded-xl border border-[#8B5CF6]/40 bg-[#8B5CF6]/10 text-xs font-medium flex items-center justify-center gap-1.5"
+                >
+                  <Moon size={14} className="text-[#A78BFA]" /> Chế độ ngủ (OLED)
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Input Mode Tabs */}
           <div className="flex gap-1 mb-3">
@@ -1549,8 +1632,8 @@ export default function AudiobookApp() {
 
       {/* ===== BLACKLIST MODAL ===== */}
       {showBlacklist && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 sm:p-4">
-          <div className={`w-full max-w-md max-h-[85vh] overflow-y-auto rounded-xl p-4 sm:p-6 shadow-2xl ${theme === 'dark' ? 'bg-gray-900 text-white' : theme === 'sepia' ? 'bg-amber-50 text-amber-900' : 'bg-white text-gray-900'}`}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-4">
+          <div className={`w-full max-w-md max-h-[85vh] overflow-y-auto rounded-2xl p-4 sm:p-6 shadow-2xl border ${theme === 'dark' ? 'bg-[#11131C] border-white/10 text-gray-100' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-200 text-gray-900'}`}>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-bold">Danh sách đen (watermarks, từ cần lọc)</h3>
               <button onClick={() => setShowBlacklist(false)}><X size={18} /></button>
@@ -1765,12 +1848,23 @@ export default function AudiobookApp() {
 
       {/* ===== BOTTOM PLAYER BAR ===== */}
       {chunks.length > 0 && (
-        <div className={`fixed bottom-0 inset-x-0 z-40 border-t ${panelClasses[theme]} player-bar pb-[env(safe-area-inset-bottom)]`}>
-          {/* Interactive Seek / Scrubbing Bar */}
-          <div className="max-w-5xl mx-auto px-3 sm:px-4 pt-2">
-            <div className="flex items-center gap-2 sm:gap-3">
-              <span className="text-[11px] sm:text-xs font-medium tabular-nums opacity-70 whitespace-nowrap">
-                Đoạn {currentChunk + 1}/{chunks.length}
+        <div
+          className={`fixed bottom-0 inset-x-0 z-40 border-t ${
+            theme === 'dark' ? 'bg-[#1B1D2B]/95 border-white/10' : panelClasses[theme]
+          } player-bar pb-[env(safe-area-inset-bottom)]`}
+        >
+          <div className="max-w-4xl mx-auto px-3 sm:px-5 pt-2.5 pb-2.5 space-y-2.5">
+            {/* Centered Chapter Title */}
+            {title && (
+              <div className="text-center text-xs sm:text-sm font-medium text-[#F3F4F6] truncate px-2">
+                {title.normalize('NFC')}
+              </div>
+            )}
+
+            {/* Smooth Violet Progress Slider */}
+            <div className="flex items-center gap-2.5">
+              <span className="text-[11px] font-medium tabular-nums text-[#9CA3AF] whitespace-nowrap">
+                {currentChunk + 1}/{chunks.length}
               </span>
               <input
                 type="range"
@@ -1779,106 +1873,129 @@ export default function AudiobookApp() {
                 value={currentChunk}
                 onChange={(e) => seekToChunk(parseInt(e.target.value, 10))}
                 aria-label="Tua tiến độ đọc"
-                className="min-w-0 flex-1 h-1.5 accent-indigo-500 cursor-pointer"
+                className="min-w-0 flex-1 h-1.5 accent-[#8B5CF6] cursor-pointer"
               />
-              <span className="text-[11px] sm:text-xs font-medium tabular-nums opacity-70 whitespace-nowrap">
-                {Math.round(((currentChunk + 1) / chunks.length) * 100)}% · ~{estLeft}p
+              <span className="text-[11px] font-semibold tabular-nums text-[#8B5CF6] whitespace-nowrap">
+                {Math.round(((currentChunk + 1) / chunks.length) * 100)}% • ~{estLeft}p
               </span>
             </div>
-          </div>
 
-          <div className="max-w-5xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5">
-            {/* Row 1: Main controls */}
-            <div className="flex items-center gap-1.5 sm:gap-2.5 flex-wrap mb-2">
+            {/* Centered Transport Row */}
+            <div className="flex items-center justify-center gap-3 sm:gap-5 py-0.5">
               <button
                 onClick={() => seekToChunk(currentChunkRef.current - 3)}
-                className="px-2 py-1 rounded-lg border border-current/20 text-xs font-semibold hover:bg-white/10 transition-colors shrink-0"
+                className="min-h-[40px] px-2.5 py-1.5 rounded-full border border-white/10 text-xs font-semibold text-[#9CA3AF] hover:border-[#8B5CF6]/60 hover:text-[#F3F4F6] transition-colors shrink-0"
                 title="Lùi 3 đoạn"
               >
                 −3
               </button>
-              <button onClick={skipBack} className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0" aria-label="Đoạn trước">
-                <SkipBack size={18} />
+              <button
+                onClick={skipBack}
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full hover:bg-white/10 transition-colors shrink-0"
+                aria-label="Đoạn trước"
+              >
+                <SkipBack size={20} />
               </button>
               <button
                 onClick={togglePlayPause}
-                className="p-2.5 sm:p-3 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white transition-colors shadow-lg shrink-0"
+                className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-gradient-to-br from-[#8B5CF6] to-[#7C5DFA] hover:scale-105 text-white flex items-center justify-center transition-transform shadow-[0_0_20px_rgba(139,92,246,0.4)] shrink-0"
                 aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
               >
-                {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+                {isPlaying ? <Pause size={22} /> : <Play size={22} className="ml-0.5" />}
               </button>
-              <button onClick={skipNext} className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0" aria-label="Đoạn tiếp">
-                <SkipForward size={18} />
+              <button
+                onClick={skipNext}
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full hover:bg-white/10 transition-colors shrink-0"
+                aria-label="Đoạn tiếp"
+              >
+                <SkipForward size={20} />
               </button>
               <button
                 onClick={() => seekToChunk(currentChunkRef.current + 3)}
-                className="px-2 py-1 rounded-lg border border-current/20 text-xs font-semibold hover:bg-white/10 transition-colors shrink-0"
+                className="min-h-[40px] px-2.5 py-1.5 rounded-full border border-white/10 text-xs font-semibold text-[#9CA3AF] hover:border-[#8B5CF6]/60 hover:text-[#F3F4F6] transition-colors shrink-0"
                 title="Tiến 3 đoạn"
               >
                 +3
               </button>
-
-              {/* Voice selector */}
-              <select
-                value={voice}
-                onChange={e => setVoice(e.target.value)}
-                className={`min-w-0 max-w-[135px] sm:max-w-none text-xs sm:text-sm rounded-lg border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
-                {VOICES.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}
-              </select>
-
-              {/* Speed */}
-              <select
-                value={speed}
-                onChange={e => setSpeed(parseFloat(e.target.value))}
-                className={`text-xs sm:text-sm rounded-lg border px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
-                {SPEED_OPTIONS.map(s => <option key={s} value={s}>{s}x</option>)}
-              </select>
-
-              {/* Chunk counter + ETA */}
-              <span className="text-xs opacity-50 ml-auto hidden sm:block">
-                {currentChunk + 1}/{chunks.length} · ~{estLeft}p còn lại
-              </span>
             </div>
 
-            {/* Row 2: Volume + Auto-next + Sleep timer + Ambient + Export */}
-            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-              {/* Volume */}
-              <div className="flex items-center gap-1.5">
-                <button onClick={() => setVolume(v => v > 0 ? 0 : 0.9)}>
-                  {volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
-                </button>
-                <input type="range" min="0" max="1" step="0.05" value={volume}
-                  onChange={e => setVolume(parseFloat(e.target.value))}
-                  className="w-20 accent-indigo-500" />
-              </div>
-
-              {/* Auto-next toggle */}
-              <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                <div className={`w-9 h-5 rounded-full relative transition-colors ${autoNext ? 'bg-indigo-600' : 'bg-gray-600'}`}
-                  onClick={() => setAutoNext(a => !a)}>
-                  <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${autoNext ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                </div>
-                Tự động chương tiếp
-              </label>
-
-              {/* Sleep timer */}
-              <div className="flex items-center gap-1 text-xs">
-                <Timer size={14} className="opacity-60" />
-                <select value={sleepTimer} onChange={e => setSleep(e.target.value as SleepTimerOption)}
-                  className={`text-xs rounded border px-1.5 py-0.5 focus:outline-none ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
-                  <option value="none">Tắt hẹn giờ</option>
-                  <option value="15">15 phút</option>
-                  <option value="30">30 phút</option>
-                  <option value="60">60 phút</option>
-                  <option value="chapter">Hết chương</option>
+            {/* Compact Secondary Row */}
+            <div className="flex items-center justify-between gap-2 flex-wrap pt-1 border-t border-current/10">
+              <div className="flex items-center gap-2 flex-wrap">
+                <select
+                  value={voice}
+                  onChange={e => setVoice(e.target.value)}
+                  className={`min-w-0 max-w-[130px] sm:max-w-none text-xs rounded-lg border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#8B5CF6] ${theme === 'dark' ? 'bg-[#252525] border-white/10 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}
+                >
+                  {VOICES.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}
                 </select>
+
+                <select
+                  value={speed}
+                  onChange={e => setSpeed(parseFloat(e.target.value))}
+                  className={`text-xs rounded-lg border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#8B5CF6] ${theme === 'dark' ? 'bg-[#252525] border-white/10 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}
+                >
+                  {SPEED_OPTIONS.map(s => <option key={s} value={s}>{s}x</option>)}
+                </select>
+
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => setVolume(v => v > 0 ? 0 : 0.9)} className="p-1">
+                    {volume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                  </button>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={volume}
+                    onChange={e => setVolume(parseFloat(e.target.value))}
+                    className="w-16 sm:w-20 accent-[#8B5CF6]"
+                  />
+                </div>
               </div>
 
-              {/* Export MP3 */}
-              <button onClick={exportMp3} title="Xuất MP3"
-                className={`ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded border ${panelClasses[theme]}`}>
-                <Download size={13} /> MP3
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                  <div
+                    className={`w-8 h-4 rounded-full relative transition-colors ${autoNext ? 'bg-[#8B5CF6]' : 'bg-gray-600'}`}
+                    onClick={() => setAutoNext(a => !a)}
+                  >
+                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${autoNext ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                  </div>
+                  <span className="hidden sm:inline">Tự chuyển</span>
+                </label>
+
+                <div className="flex items-center gap-1 text-xs">
+                  <Timer size={13} className="opacity-60" />
+                  <select
+                    value={sleepTimer}
+                    onChange={e => setSleep(e.target.value as SleepTimerOption)}
+                    className={`text-xs rounded-lg border px-1.5 py-1 focus:outline-none ${theme === 'dark' ? 'bg-[#252525] border-white/10 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}
+                  >
+                    <option value="none">Hẹn giờ</option>
+                    <option value="15">15p</option>
+                    <option value="30">30p</option>
+                    <option value="60">60p</option>
+                    <option value="chapter">Hết chương</option>
+                  </select>
+                </div>
+
+                <button
+                  onClick={() => setShowPronunciation(true)}
+                  className={`text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60`}
+                  title="Từ điển phát âm"
+                >
+                  🗣 Từ điển
+                </button>
+
+                <button
+                  onClick={exportMp3}
+                  title="Xuất MP3"
+                  className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60`}
+                >
+                  <Download size={13} /> MP3
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1971,7 +2088,12 @@ export default function AudiobookApp() {
         onResumeEntry={handleResumeBookshelf}
         onDeleteEntry={handleDeleteBookshelf}
         isLoggedIn={Boolean(user)}
+        userLabel={user?.displayName || user?.email || ''}
         onOpenAuth={() => setShowAuthModal(true)}
+        onSignOut={() => {
+          signOutUser();
+          setShowBookshelf(false);
+        }}
         theme={theme}
       />
 
