@@ -1,0 +1,88 @@
+@import 'tailwindcss';
+
+/* ===== THEME TOKENS ===== */
+@theme {
+  --color-sepia-50: #faf3e0;
+  --color-sepia-100: #f5e6c8;
+  --color-sepia-200: #e8d0a0;
+  --color-sepia-300: #d4b578;
+  --color-sepia-400: #c09a50;
+  --color-sepia-500: #a07838;
+  --color-sepia-600: #7a5a28;
+  --color-sepia-700: #5a4020;
+  --color-sepia-800: #3a2810;
+  --color-sepia-900: #1a1008;
+
+  --font-family-serif: "Times New Roman", "Segoe UI", system-ui, serif;
+  --font-family-sans: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  --font-family-mono: "Consolas", "Courier New", monospace;
+}
+
+/* ===== CSS CUSTOM PROPERTIES FOR THEME ===== */
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --panel: #f8f8f8;
+  --border: #e5e7eb;
+  --accent: #6366f1;
+  --muted: #6b7280;
+}
+
+html.dark {
+  --bg: #0f0f0f;
+  --fg: #e8e8e8;
+  --panel: #1a1a1a;
+  --border: #2d2d2d;
+  --accent: #818cf8;
+  --muted: #9ca3af;
+  color-scheme: dark;
+}
+
+html.sepia {
+  --bg: #f5e6c8;
+  --fg: #3a2810;
+  --panel: #ede0c4;
+  --border: #c8a86e;
+  --accent: #7a5a28;
+  --muted: #8c6a40;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 3px;
+}
+
+/* ===== KARAOKE HIGHLIGHT ===== */
+.sentence-active {
+  background-color: rgba(99, 102, 241, 0.2);
+  border-radius: 3px;
+  padding: 1px 2px;
+  transition: background-color 0.2s ease;
+}
+
+html.dark .sentence-active {
+  background-color: rgba(129, 140, 248, 0.25);
+}
+
+html.sepia .sentence-active {
+  background-color: rgba(122, 90, 40, 0.2);
+}
+
+/* ===== PLAYER BLUR ===== */
+.player-bar {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
