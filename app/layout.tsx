@@ -7,6 +7,7 @@ export const metadata: Metadata = {
   keywords: ['vietnamese novel', 'audiobook', 'text-to-speech', 'truyện audio', 'nghe truyện'],
   icons: {
     icon: '/logo.png',
+    shortcut: '/logo.png',
     apple: '/logo.png',
   },
 };

@@ -56,11 +56,6 @@ export default function BookshelfModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-current/10 shrink-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="font-bold text-base sm:text-lg tracking-tight">📚 Tủ truyện của bạn</h3>
-            {isLoggedIn && (
-              <span className="text-[11px] font-medium text-[#34D399]">
-                ✓ Đã đồng bộ
-              </span>
-            )}
           </div>
           <button
             onClick={onClose}

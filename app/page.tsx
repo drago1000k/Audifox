@@ -6,13 +6,14 @@ import {
   Moon, Sun, BookOpen, Upload, Link2, RotateCcw,
   Timer, Download, Settings2, X, Check, AlertCircle, Loader2,
   List, Lock, ExternalLink, Zap, ClipboardPaste, BookMarked, ListOrdered,
-  LogIn, LogOut, Menu
+  LogIn, LogOut, Menu, PanelLeft, Crosshair
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import BookmarkletModal from '@/components/BookmarkletModal';
 import PronunciationModal from '@/components/PronunciationModal';
 import BookshelfModal from '@/components/BookshelfModal';
 import AuthModal from '@/components/AuthModal';
+import ReaderSidebar from '@/components/ReaderSidebar';
 import {
   subscribeAuth,
   signOutUser,
@@ -72,6 +73,11 @@ export default function AudiobookApp() {
   const [showBookshelf, setShowBookshelf] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [userScrolledAway, setUserScrolledAway] = useState(false);
+  const programmaticScrollRef = useRef(false);
+  const activeParagraphRef = useRef(-1);
   const [user, setUser] = useState<User | null>(null);
   const userRef = useRef<User | null>(null);
   const [oledSleepMode, setOledSleepMode] = useState(false);
@@ -121,6 +127,12 @@ export default function AudiobookApp() {
   const [voice, setVoice] = useState('vi-VN-HoaiMyNeural');
   const [speed, setSpeed] = useState(1.0);
   const [pitch, setPitch] = useState(0);
+  const voiceRef = useRef('vi-VN-HoaiMyNeural');
+  const speedRef = useRef(1.0);
+  const pitchRef = useRef(0);
+  voiceRef.current = voice;
+  speedRef.current = speed;
+  pitchRef.current = pitch;
   const [volume, setVolume] = useState(0.9);
   const [autoNext, setAutoNext] = useState(true);
 
@@ -146,15 +158,17 @@ export default function AudiobookApp() {
 
   // --- Loading/Error State ---
   const [isFetching, setIsFetching] = useState(false);
+  const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [fetchError, setFetchError] = useState('');
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [clipboardImportReady, setClipboardImportReady] = useState(false);
   const [resumeBanner, setResumeBanner] = useState<{ session: SessionData; totalChunks: number } | null>(null);
   const [playlist, setPlaylist] = useState<{ title: string; url: string }[]>([]);
 
-  // --- Refs for scrolling ---
+  // --- Refs for scrolling & inputs ---
   const paragraphRefs = useRef<(HTMLParagraphElement | null)[]>([]);
   const contentRef = useRef<HTMLDivElement>(null);
+  const urlInputRef = useRef<HTMLInputElement | null>(null);
 
   // ========== THEME MANAGEMENT ==========
   useEffect(() => {
@@ -216,9 +230,14 @@ export default function AudiobookApp() {
     restoreSavedSession(resumeBanner.session, 0);
   }
 
-  // Load pronunciation rules & bookshelf on mount
+  // Load pronunciation rules, saved voice & bookshelf on mount
   useEffect(() => {
     try {
+      const savedVoice = localStorage.getItem('audifox_voice');
+      if (savedVoice && VOICES.some((v) => v.id === savedVoice)) {
+        setVoice(savedVoice);
+        voiceRef.current = savedVoice;
+      }
       const raw = localStorage.getItem('audifox_pronunciation_rules');
       if (raw) {
         const parsed = JSON.parse(raw) as PronunciationRule[];
@@ -495,6 +514,7 @@ export default function AudiobookApp() {
     playbackGenRef.current += 1;
     isPlayingRef.current = false;
     setIsPlaying(false);
+    setIsSynthesizing(false);
     setAutoplayBlocked(false);
     if (pauseTimerRef.current) {
       clearTimeout(pauseTimerRef.current);
@@ -694,13 +714,22 @@ export default function AudiobookApp() {
 
   // ========== TTS / AUDIO ENGINE ==========
   async function fetchAudioBlob(chunkIndex: number, chunkText: string): Promise<string> {
+    const reqVoice = voiceRef.current;
+    const reqSpeed = speedRef.current;
+    const reqPitch = pitchRef.current;
+
     if (blobCache.current.has(chunkIndex)) {
       return blobCache.current.get(chunkIndex)!;
     }
     if (fetchingRef.current.has(chunkIndex)) {
-      // Wait for it
-      return new Promise((resolve) => {
+      // Wait for it, aborting if voice changed mid-flight
+      return new Promise((resolve, reject) => {
         const interval = setInterval(() => {
+          if (reqVoice !== voiceRef.current) {
+            clearInterval(interval);
+            reject(new Error('Voice switched'));
+            return;
+          }
           if (blobCache.current.has(chunkIndex)) {
             clearInterval(interval);
             resolve(blobCache.current.get(chunkIndex)!);
@@ -719,9 +748,9 @@ export default function AudiobookApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: spokenText,
-          voice,
-          rate: speedToRate(speed),
-          pitch: pitchToHz(pitch),
+          voice: reqVoice,
+          rate: speedToRate(reqSpeed),
+          pitch: pitchToHz(reqPitch),
         }),
       });
 
@@ -729,17 +758,61 @@ export default function AudiobookApp() {
 
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      blobCache.current.set(chunkIndex, url);
       fetchingRef.current.delete(chunkIndex);
+
+      if (reqVoice !== voiceRef.current) {
+        URL.revokeObjectURL(url);
+        throw new Error('Voice switched');
+      }
+
+      blobCache.current.set(chunkIndex, url);
       return url;
     } catch (err) {
       fetchingRef.current.delete(chunkIndex);
+      if (reqVoice !== voiceRef.current) throw err;
       if (retries < 3) {
         retryCount.current.set(chunkIndex, retries + 1);
         await new Promise((r) => setTimeout(r, 500 * (retries + 1)));
         return fetchAudioBlob(chunkIndex, chunkText);
       }
       throw err;
+    }
+  }
+
+  function handleVoiceChange(newVoice: string) {
+    setVoice(newVoice);
+    voiceRef.current = newVoice;
+    try {
+      localStorage.setItem('audifox_voice', newVoice);
+    } catch {}
+
+    const newGen = ++playbackGenRef.current;
+    if (pauseTimerRef.current) {
+      clearTimeout(pauseTimerRef.current);
+      pauseTimerRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
+    }
+    blobCache.current.forEach((url) => URL.revokeObjectURL(url));
+    blobCache.current.clear();
+    fetchingRef.current.clear();
+    retryCount.current.clear();
+    setIsSynthesizing(false);
+
+    if (isPlayingRef.current && chunksRef.current.length > 0) {
+      playChunkRef.current(currentChunkRef.current, newGen);
+      prefetchChunks(currentChunkRef.current);
+    }
+  }
+
+  function handleSpeedChange(newSpeed: number) {
+    setSpeed(newSpeed);
+    speedRef.current = newSpeed;
+    if (audioRef.current) {
+      audioRef.current.playbackRate = newSpeed;
     }
   }
 
@@ -821,11 +894,16 @@ export default function AudiobookApp() {
     currentChunkRef.current = index;
     persistNowRef.current(index);
 
-    // Exact paragraph highlight & auto-scroll
+    // Exact paragraph highlight & smart auto-scroll (paused if user scrolled away)
     const pIdx = chunkToParagraphRef.current[index] ?? -1;
     setActiveParagraph(pIdx);
-    if (autoScrollEnabled && pIdx >= 0 && paragraphRefs.current[pIdx]) {
+    activeParagraphRef.current = pIdx;
+    if (autoScrollEnabled && !userScrolledAway && pIdx >= 0 && paragraphRefs.current[pIdx]) {
+      programmaticScrollRef.current = true;
       paragraphRefs.current[pIdx]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => {
+        programmaticScrollRef.current = false;
+      }, 650);
     }
 
     // Trigger pre-fetch for next chapter at 85%
@@ -834,6 +912,7 @@ export default function AudiobookApp() {
     }
 
     let blobUrl: string;
+    setIsSynthesizing(true);
     try {
       blobUrl = await fetchAudioBlob(index, c[index]);
       prefetchChunks(index + 1);
@@ -845,6 +924,7 @@ export default function AudiobookApp() {
         });
       }
     } catch {
+      if (gen === playbackGenRef.current) setIsSynthesizing(false);
       if (isPlayingRef.current && gen === playbackGenRef.current) {
         // Skip broken TTS chunk
         setTimeout(() => playChunkRef.current(index + 1, gen), 200);
@@ -852,10 +932,16 @@ export default function AudiobookApp() {
       return;
     }
 
-    if (!isPlayingRef.current || gen !== playbackGenRef.current) return;
+    if (!isPlayingRef.current || gen !== playbackGenRef.current) {
+      setIsSynthesizing(false);
+      return;
+    }
 
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio) {
+      setIsSynthesizing(false);
+      return;
+    }
 
     audio.src = blobUrl;
     audio.playbackRate = speed;
@@ -864,10 +950,15 @@ export default function AudiobookApp() {
 
     try {
       await waitForAudioReady(audio, gen);
-      if (!isPlayingRef.current || gen !== playbackGenRef.current) return;
+      if (!isPlayingRef.current || gen !== playbackGenRef.current) {
+        setIsSynthesizing(false);
+        return;
+      }
       await audio.play();
+      setIsSynthesizing(false);
       setAutoplayBlocked(false);
     } catch (playErr: unknown) {
+      if (gen === playbackGenRef.current) setIsSynthesizing(false);
       if (gen !== playbackGenRef.current) return;
       const errName = playErr instanceof DOMException ? playErr.name : '';
       const errMsg = playErr instanceof Error ? playErr.message : String(playErr);
@@ -948,6 +1039,7 @@ export default function AudiobookApp() {
     playbackGenRef.current += 1;
     isPlayingRef.current = false;
     setIsPlaying(false);
+    setIsSynthesizing(false);
     if (pauseTimerRef.current) {
       clearTimeout(pauseTimerRef.current);
       pauseTimerRef.current = null;
@@ -1012,9 +1104,38 @@ export default function AudiobookApp() {
   }
 
   function handleParagraphClick(pIdx: number) {
+    setUserScrolledAway(false);
     const targetChunk = paragraphToChunkStart[pIdx] ?? 0;
     seekToChunk(targetChunk, true);
   }
+
+  function scrollToActiveParagraph() {
+    const pIdx = activeParagraphRef.current;
+    setUserScrolledAway(false);
+    if (pIdx >= 0 && paragraphRefs.current[pIdx]) {
+      programmaticScrollRef.current = true;
+      paragraphRefs.current[pIdx]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => {
+        programmaticScrollRef.current = false;
+      }, 650);
+    }
+  }
+
+  // Detect manual user scrolling away from active spoken paragraph
+  useEffect(() => {
+    function onScroll() {
+      if (programmaticScrollRef.current || !isPlayingRef.current) return;
+      const pIdx = activeParagraphRef.current;
+      const el = pIdx >= 0 ? paragraphRefs.current[pIdx] : null;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const outOfView = rect.top < 80 || rect.bottom > window.innerHeight - 160;
+      if (outOfView) setUserScrolledAway(true);
+      else setUserScrolledAway(false);
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   // Global PC Keyboard Shortcuts (ignoring inputs/textareas/selects)
   const shortcutHandlersRef = useRef({
@@ -1227,6 +1348,18 @@ export default function AudiobookApp() {
   const doneChars = chunks.slice(0, currentChunk).reduce((s, c) => s + c.length, 0);
   const estLeft = estimateMinutes(totalChars - doneChars, speed);
 
+  const detectedUrlDomain = (() => {
+    const raw = urlInput.trim();
+    if (!raw) return null;
+    try {
+      const u = new URL(raw);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        return u.hostname.replace(/^www\./, '');
+      }
+    } catch {}
+    return null;
+  })();
+
   const themeClasses: Record<Theme, string> = {
     dark: 'bg-[#0E101A] text-[#F3F4F6]',
     sepia: 'bg-amber-50 text-amber-900',
@@ -1234,7 +1367,7 @@ export default function AudiobookApp() {
   };
 
   const panelClasses: Record<Theme, string> = {
-    dark: 'bg-[#222434] border-white/10',
+    dark: 'bg-[#181B28] border-white/[0.07]',
     sepia: 'bg-amber-100 border-amber-300',
     light: 'bg-gray-50 border-gray-200',
   };
@@ -1249,29 +1382,47 @@ export default function AudiobookApp() {
     <div className={`min-h-screen overflow-x-hidden ${themeClasses[theme]} transition-colors duration-300`}>
       {/* Hidden audio element managed by ref */}
 
-      {/* ===== RESUME BANNER ===== */}
+      {/* ===== COMPACT SINGLE-ROW RESUME BANNER ===== */}
       {resumeBanner && (
-        <div className={`sticky top-0 z-50 border-b px-4 py-2.5 ${theme === 'dark' ? 'bg-indigo-950/95 border-indigo-800 text-indigo-100' : theme === 'sepia' ? 'bg-amber-200 border-amber-400 text-amber-950' : 'bg-indigo-50 border-indigo-200 text-indigo-950'} text-sm`}>
-          <div className="max-w-3xl mx-auto flex flex-wrap items-center justify-between gap-3">
-            <span>
-              📖 Phiên đọc gần nhất: <strong>{(resumeBanner.session.title || 'Chương đã lưu').normalize('NFC')}</strong> · Đoạn{' '}
-              <strong>{resumeBanner.session.chunkIndex + 1}</strong> / {resumeBanner.totalChunks}
-            </span>
-            <div className="flex items-center gap-2">
+        <div
+          className={`sticky top-0 z-50 border-b px-3 sm:px-6 lg:px-10 py-1.5 text-xs ${
+            theme === 'dark'
+              ? 'bg-[#181B28]/95 border-white/[0.08] text-[#F3F4F6]'
+              : theme === 'sepia'
+                ? 'bg-amber-200 border-amber-400 text-amber-950'
+                : 'bg-indigo-50 border-indigo-200 text-indigo-950'
+          }`}
+        >
+          <div className="max-w-[1440px] mx-auto flex items-center justify-between gap-2">
+            <div className="min-w-0 flex-1 truncate">
+              <span className="opacity-75 mr-1">📖</span>
+              <strong className="font-medium">
+                {(resumeBanner.session.title || 'Phiên trước').normalize('NFC')}
+              </strong>
+              <span className="text-[#9CA3AF] ml-1.5">
+                · Đoạn {resumeBanner.session.chunkIndex + 1}/{resumeBanner.totalChunks}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
                 onClick={handleResumeFromSaved}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1 transition-colors"
+                className="px-2.5 py-1 rounded-full bg-gradient-to-r from-[#8B5CF6] to-[#7C3AED] hover:opacity-95 text-white text-[11px] font-semibold inline-flex items-center gap-1 transition-opacity"
               >
-                <Play size={12} /> Tiếp tục từ đoạn {resumeBanner.session.chunkIndex + 1}
+                <Play size={10} /> Tiếp tục
               </button>
               <button
                 onClick={handleRestartChapter}
-                className="px-2.5 py-1 rounded-full border border-current/25 text-xs font-medium hover:bg-black/10 flex items-center gap-1"
+                className="hidden sm:inline-flex px-2.5 py-1 rounded-full border border-current/20 text-[11px] font-medium hover:bg-white/10 items-center gap-1"
               >
-                <RotateCcw size={12} /> Đọc lại từ đầu
+                <RotateCcw size={10} /> Từ đầu
               </button>
-              <button onClick={() => setResumeBanner(null)} className="opacity-70 hover:opacity-100 p-1" title="Đóng">
-                <X size={15} />
+              <button
+                onClick={() => setResumeBanner(null)}
+                className="opacity-65 hover:opacity-100 p-1"
+                title="Đóng"
+                aria-label="Đóng thông báo khôi phục"
+              >
+                <X size={13} />
               </button>
             </div>
           </div>
@@ -1280,7 +1431,7 @@ export default function AudiobookApp() {
 
       {/* ===== TOP BAR ===== */}
       <header className={`sticky top-0 z-40 border-b ${panelClasses[theme]} player-bar`}>
-        <div className="max-w-5xl mx-auto px-3 sm:px-5 py-3">
+        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-10 py-3">
           {/* Row 1: Fox Logo + Desktop Menu + Account */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 mb-3">
             <div className="flex items-center justify-between gap-2">
@@ -1329,12 +1480,13 @@ export default function AudiobookApp() {
               </div>
             </div>
 
-            {/* Desktop Menu Items + Account */}
-            <div className="flex items-center justify-between sm:justify-end gap-2 flex-wrap">
-              <div className="hidden sm:flex items-center gap-1.5">
+            {/* Desktop Menu Items + Utility Cluster + Account */}
+            <div className="flex items-center justify-between sm:justify-end gap-3 flex-wrap">
+              {/* Primary Actions Group */}
+              <div className="hidden sm:flex items-center gap-2">
                 <button
                   onClick={() => setShowBookshelf(true)}
-                  className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
                   title="Tủ truyện"
                 >
                   <BookMarked size={14} className="text-[#8B5CF6]" />
@@ -1347,7 +1499,7 @@ export default function AudiobookApp() {
                 </button>
                 <button
                   onClick={() => setShowBookmarklet(true)}
-                  className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-amber-400/60 transition-colors`}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-amber-400/60 transition-colors`}
                   title="Nút đọc 1-Click (Bookmarklet)"
                 >
                   <Zap size={14} className="text-amber-400" />
@@ -1355,40 +1507,43 @@ export default function AudiobookApp() {
                 </button>
                 <button
                   onClick={handlePasteClipboardAndPlay}
-                  className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
                   title="Dán & Phát ngay"
                 >
                   <ClipboardPaste size={14} className="text-[#A78BFA]" />
                   <span>Dán & Phát ngay</span>
                 </button>
+              </div>
+
+              {/* Secondary Utility Icon Cluster */}
+              <div className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded-xl border ${panelClasses[theme]}`}>
                 {chunks.length > 0 && (
                   <button
                     onClick={() => setOledSleepMode(true)}
-                    className={`px-3 py-1.5 rounded-xl ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1.5 hover:border-[#8B5CF6]/60 transition-colors`}
+                    className="p-1.5 rounded-lg hover:bg-white/10 text-[#A78BFA] transition-colors"
                     title="Chế độ ngủ (OLED)"
                   >
-                    <Moon size={14} className="text-[#A78BFA]" />
-                    <span className="hidden md:inline">Chế độ ngủ (OLED)</span>
+                    <Moon size={15} />
                   </button>
                 )}
                 <button
                   onClick={() => setTheme(t => t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark')}
-                  className={`p-2 rounded-xl ${panelClasses[theme]} border`}
+                  className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
                   title="Đổi theme"
                 >
-                  {theme === 'dark' ? <Moon size={15} /> : theme === 'sepia' ? <BookOpen size={15} /> : <Sun size={15} />}
+                  {theme === 'dark' ? <Sun size={15} /> : theme === 'sepia' ? <BookOpen size={15} /> : <Moon size={15} />}
                 </button>
                 <button
                   onClick={() => setShowSettings(!showSettings)}
-                  className={`p-2 rounded-xl ${panelClasses[theme]} border`}
-                  title="Cài đặt"
+                  className={`p-1.5 rounded-lg hover:bg-white/10 transition-colors ${showSettings ? 'text-[#8B5CF6]' : ''}`}
+                  title="Cài đặt & Từ điển"
                 >
                   <Settings2 size={15} />
                 </button>
                 {playlist.length > 0 && (
                   <button
                     onClick={() => setShowPlaylist(!showPlaylist)}
-                    className={`p-2 rounded-xl ${panelClasses[theme]} border`}
+                    className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
                     title="Danh sách chương"
                   >
                     <List size={15} />
@@ -1409,7 +1564,6 @@ export default function AudiobookApp() {
                     )}
                     <span className="truncate max-w-[180px] sm:max-w-[170px] text-[#F3F4F6] font-medium tracking-tight">
                       {user.displayName || user.email}
-                      <span className="text-[#34D399] font-normal"> • ✓ Đã đồng bộ</span>
                     </span>
                   </div>
                   <button
@@ -1485,45 +1639,66 @@ export default function AudiobookApp() {
             </button>
           </div>
 
-          {/* URL Input */}
+          {/* URL Input (Prominent 48px Bar + Detected Domain Badge) */}
           {inputMode === 'url' && (
-            <div className="flex flex-wrap sm:flex-nowrap gap-2">
-              <input
-                type="url"
-                value={urlInput}
-                onChange={(e) => setUrlInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleFetchAndPlay()}
-                placeholder="Dán URL chương truyện... (vd: truyenfull.vn/truyen/chuong-1)"
-                className={`min-w-0 flex-1 basis-full sm:basis-auto px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900 placeholder-amber-400' : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'}`}
-              />
-              <button
-                onClick={handleFetchAndPlay}
-                disabled={isFetching || !urlInput.trim()}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
-                {isFetching ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-                {isFetching ? 'Đang tải...' : 'Phát'}
-              </button>
-              {(prevUrl || chapterHistory.length > 0) && (
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap sm:flex-nowrap gap-2">
+                <input
+                  ref={urlInputRef}
+                  type="url"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleFetchAndPlay()}
+                  placeholder="Dán URL chương truyện... (vd: https://tieuthuyetmang.com/truyen/...)"
+                  className={`min-w-0 flex-1 basis-full sm:basis-auto h-12 px-4 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-[#8B5CF6]/40 focus:border-[#8B5CF6] transition-all ${
+                    theme === 'dark'
+                      ? 'bg-[#12141E] border-white/[0.08] text-[#F3F4F6] placeholder-gray-400'
+                      : theme === 'sepia'
+                        ? 'bg-amber-50 border-amber-300 text-amber-900 placeholder-amber-500'
+                        : 'bg-white border-gray-300 text-gray-900 placeholder-gray-500'
+                  }`}
+                />
                 <button
-                  onClick={handlePrevChapter}
-                  disabled={isFetching}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${panelClasses[theme]} disabled:opacity-50 flex items-center gap-1 transition-colors`}
-                  title="Chương trước"
+                  onClick={handleFetchAndPlay}
+                  disabled={isFetching || !urlInput.trim()}
+                  className="h-12 px-5 bg-gradient-to-r from-[#8B5CF6] to-[#7C5DFA] hover:opacity-95 disabled:opacity-45 text-white rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-opacity shadow-md shrink-0"
                 >
-                  <SkipBack size={16} />
-                  Trước
+                  {isFetching ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                  {isFetching ? 'Đang tải...' : 'Phát'}
                 </button>
-              )}
-              {nextUrl && (
-                <button
-                  onClick={handleNextChapter}
-                  disabled={isFetching}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${panelClasses[theme]} disabled:opacity-50 flex items-center gap-1 transition-colors`}
-                  title="Chương tiếp theo"
-                >
-                  <SkipForward size={16} />
-                  Tiếp
-                </button>
+                {(prevUrl || chapterHistory.length > 0) && (
+                  <button
+                    onClick={handlePrevChapter}
+                    disabled={isFetching}
+                    className={`h-12 px-3.5 rounded-xl text-sm font-medium border ${panelClasses[theme]} disabled:opacity-50 flex items-center gap-1 transition-colors shrink-0`}
+                    title="Chương trước"
+                  >
+                    <SkipBack size={16} />
+                    Trước
+                  </button>
+                )}
+                {nextUrl && (
+                  <button
+                    onClick={handleNextChapter}
+                    disabled={isFetching}
+                    className={`h-12 px-3.5 rounded-xl text-sm font-medium border ${panelClasses[theme]} disabled:opacity-50 flex items-center gap-1 transition-colors shrink-0`}
+                    title="Chương tiếp theo"
+                  >
+                    <SkipForward size={16} />
+                    Tiếp
+                  </button>
+                )}
+              </div>
+
+              {detectedUrlDomain && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-[#34D399] font-medium">
+                    <Check size={12} /> URL hợp lệ
+                  </span>
+                  <span className="text-[#9CA3AF] truncate">
+                    Nguồn: <strong className="text-[#F3F4F6] font-medium">{detectedUrlDomain}</strong>
+                  </span>
+                </div>
               )}
             </div>
           )}
@@ -1590,7 +1765,7 @@ export default function AudiobookApp() {
       {/* ===== SETTINGS PANEL ===== */}
       {showSettings && (
         <div className={`border-b ${panelClasses[theme]}`}>
-          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap gap-3 sm:gap-4 items-center">
+          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-10 py-3 flex flex-wrap gap-3 sm:gap-4 items-center">
             {/* Font size */}
             <div className="flex items-center gap-2 text-sm">
               <span className="opacity-60">Cỡ chữ</span>
@@ -1658,202 +1833,295 @@ export default function AudiobookApp() {
         </div>
       )}
 
-      {/* ===== MAIN CONTENT ===== */}
-      <main className={`max-w-3xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 ${chunks.length > 0 ? 'pb-56 sm:pb-44' : 'pb-16'}`}>
-        {/* Playlist sidebar */}
-        {showPlaylist && playlist.length > 0 && (
-          <div className={`mb-6 p-4 rounded-xl border ${panelClasses[theme]}`}>
-            <h3 className="font-semibold mb-2 text-sm">📋 Danh sách chương đã đọc</h3>
-            <ul className="space-y-1">
-              {playlist.map((item, idx) => (
-                <li key={idx} className="text-sm flex items-center gap-2">
-                  <span className="opacity-40">{idx + 1}.</span>
-                  <button onClick={() => loadChapterByUrl(item.url, true, true)}
-                    className="hover:text-indigo-500 text-left truncate">{item.title || item.url}</button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+      {/* ===== MAIN CONTENT (3-ZONE ACTIVE READER / EMPTY STATE) ===== */}
+      <main className={`max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-10 pt-5 sm:pt-7 ${chunks.length > 0 ? 'pb-56 sm:pb-44' : 'pb-16'}`}>
+        {paragraphs.length > 0 || isLocked ? (
+          <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
+            {/* Zone 1: Collapsible Desktop Sidebar / Mobile Slide-Over Drawer */}
+            <ReaderSidebar
+              theme={theme}
+              desktopOpen={desktopSidebarOpen}
+              onToggleDesktop={() => setDesktopSidebarOpen(false)}
+              mobileOpen={mobileSidebarOpen}
+              onCloseMobile={() => setMobileSidebarOpen(false)}
+              subChapters={subChapters}
+              activeParagraph={activeParagraph}
+              onJumpToChunk={(cIdx) => {
+                setUserScrolledAway(false);
+                seekToChunk(cIdx, true);
+              }}
+              bookshelfItems={bookshelfItems}
+              onResumeBookshelf={handleResumeBookshelf}
+              onDeleteBookshelf={handleDeleteBookshelf}
+              isLoggedIn={Boolean(user)}
+              onOpenAuth={() => setShowAuthModal(true)}
+              playlist={playlist}
+              currentUrl={urlInput}
+              onSelectHistoryUrl={(u) => loadChapterByUrl(u, true, true)}
+            />
 
-        {/* Chapter title */}
-        {title && (
-          <div className="mb-6 sm:mb-8 pb-4 border-b border-current/10 flex flex-wrap sm:flex-nowrap items-start justify-between gap-3">
-            <h1
-              onClick={() => seekToChunk(0, true)}
-              className={`min-w-0 flex-1 break-words font-bold leading-snug cursor-pointer rounded-lg transition-colors ${fontFamilyMap[fontFamily]} ${
-                activeParagraph === -1 && currentChunk === 0 && isPlaying
-                  ? 'text-indigo-400'
-                  : ''
-              }`}
-              style={{ fontSize: `${fontSize + 6}px` }}
-              title="Nhấn để đọc từ tiêu đề"
-            >
-              {title.normalize('NFC')}
-            </h1>
-            <div className="flex items-center gap-1 shrink-0 text-xs">
-              <button
-                onClick={() => setFontSize((s) => Math.max(14, s - 1))}
-                className={`px-2 py-1 rounded border ${panelClasses[theme]}`}
-                title="Giảm cỡ chữ"
-              >
-                A−
-              </button>
-              <button
-                onClick={() => setFontSize((s) => Math.min(28, s + 1))}
-                className={`px-2 py-1 rounded border ${panelClasses[theme]}`}
-                title="Tăng cỡ chữ"
-              >
-                A+
-              </button>
+            {/* Zone 2: Centered Reading Column (max-w-3xl) */}
+            <div className="min-w-0 flex-1 w-full max-w-3xl mx-auto">
+              {/* Reading Toolbar + Chapter Title */}
+              <div className="mb-6 pb-4 border-b border-current/10 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  {/* Mobile Drawer Trigger */}
+                  <button
+                    onClick={() => setMobileSidebarOpen(true)}
+                    className={`lg:hidden min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 ${panelClasses[theme]}`}
+                  >
+                    <PanelLeft size={15} className="text-[#8B5CF6]" /> Mục lục / Tủ truyện
+                  </button>
+                  {/* Desktop Expand Sidebar Trigger (when collapsed) */}
+                  {!desktopSidebarOpen && (
+                    <button
+                      onClick={() => setDesktopSidebarOpen(true)}
+                      className={`hidden lg:inline-flex min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-medium items-center gap-1.5 ${panelClasses[theme]}`}
+                    >
+                      <PanelLeft size={15} className="text-[#8B5CF6]" /> Mở thanh bên
+                    </button>
+                  )}
+                </div>
+
+                {title && (
+                  <div className="flex items-center gap-1 shrink-0 text-xs ml-auto">
+                    <button
+                      onClick={() => setFontSize((s) => Math.max(14, s - 1))}
+                      className={`min-h-[36px] px-2.5 py-1 rounded-lg border ${panelClasses[theme]}`}
+                      title="Giảm cỡ chữ"
+                    >
+                      A−
+                    </button>
+                    <button
+                      onClick={() => setFontSize((s) => Math.min(28, s + 1))}
+                      className={`min-h-[36px] px-2.5 py-1 rounded-lg border ${panelClasses[theme]}`}
+                      title="Tăng cỡ chữ"
+                    >
+                      A+
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {title && (
+                <h1
+                  onClick={() => seekToChunk(0, true)}
+                  className={`mb-6 break-words font-bold leading-snug cursor-pointer rounded-lg transition-colors ${fontFamilyMap[fontFamily]} ${
+                    activeParagraph === -1 && currentChunk === 0 && isPlaying
+                      ? 'text-[#A78BFA]'
+                      : ''
+                  }`}
+                  style={{ fontSize: `${fontSize + 6}px` }}
+                  title="Nhấn để đọc từ tiêu đề"
+                >
+                  {title.normalize('NFC')}
+                </h1>
+              )}
+
+              {/* Locked / Login Required State */}
+              {isLocked ? (
+                <div className={`rounded-2xl border p-8 text-center space-y-4 ${panelClasses[theme]}`}>
+                  <div className="mx-auto w-12 h-12 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center">
+                    <Lock size={24} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h2 className="text-lg font-bold">Chương này đang bị khóa</h2>
+                    <p className="text-sm opacity-75 max-w-md mx-auto">
+                      {lockedReason === 'LOGIN_REQUIRED'
+                        ? `Trang ${sourceDomain || 'nguồn'} yêu cầu đăng nhập tài khoản để đọc chương này. Tự động chuyển chương đã được tạm dừng.`
+                        : 'Không thể trích xuất nội dung chương này.'}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                    {urlInput && (
+                      <a
+                        href={urlInput}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 rounded-lg bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors"
+                      >
+                        <ExternalLink size={15} /> Mở trang gốc để đăng nhập
+                      </a>
+                    )}
+                    <button
+                      onClick={() => setShowBookmarklet(true)}
+                      className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-black text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
+                    >
+                      <Zap size={15} /> Nút đọc 1-Click (Bookmarklet)
+                    </button>
+                    <button
+                      onClick={handlePasteClipboardAndPlay}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium ${panelClasses[theme]} inline-flex items-center gap-1.5`}
+                    >
+                      <ClipboardPaste size={15} /> Dán & Phát ngay
+                    </button>
+                    {urlInput && (
+                      <button
+                        onClick={() => loadChapterByUrl(urlInput, false, false)}
+                        className={`px-3 py-2 rounded-lg border text-sm font-medium ${panelClasses[theme]} inline-flex items-center gap-1`}
+                      >
+                        <RotateCcw size={14} /> Thử lại
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <article
+                  ref={contentRef}
+                  className={`space-y-5 leading-[1.85] ${fontFamilyMap[fontFamily]}`}
+                  style={{ fontSize: `${fontSize}px` }}
+                >
+                  {paragraphs.map((para, idx) => {
+                    const isActive = idx === activeParagraph;
+                    return (
+                      <p
+                        key={idx}
+                        ref={(el) => { paragraphRefs.current[idx] = el; }}
+                        onClick={() => handleParagraphClick(idx)}
+                        className={`group relative cursor-pointer break-words rounded-xl px-3.5 py-2.5 border-l-2 transition-all duration-200 ${
+                          isActive
+                            ? theme === 'dark'
+                              ? 'border-[#8B5CF6] bg-[#8B5CF6]/12 text-[#F3F4F6]'
+                              : theme === 'sepia'
+                                ? 'border-amber-700 bg-amber-900/10 text-amber-950'
+                                : 'border-[#8B5CF6] bg-violet-50 text-gray-950'
+                            : 'border-transparent hover:border-[#8B5CF6]/40 hover:bg-white/[0.04]'
+                        }`}
+                      >
+                        {para.normalize('NFC')}
+                        <span className="ml-2 inline-block text-[11px] font-sans font-medium opacity-0 group-hover:opacity-75 text-[#A78BFA] transition-opacity select-none">
+                          ▶ Đọc từ đoạn này
+                        </span>
+                      </p>
+                    );
+                  })}
+                </article>
+              )}
             </div>
           </div>
-        )}
+        ) : (
+          <div className={`max-w-[1280px] mx-auto my-5 sm:my-10 rounded-3xl border p-6 sm:p-10 lg:p-12 ${panelClasses[theme]} shadow-xl`}>
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-center">
+              {/* Left Column: Emblem, Waveform, Headline, Description & Primary CTAs */}
+              <div className="lg:col-span-7 text-center lg:text-left space-y-6">
+                <div className="flex flex-col lg:flex-row items-center gap-4">
+                  <div className="w-16 h-16 rounded-2xl bg-[#8B5CF6]/15 border border-[#8B5CF6]/25 flex items-center justify-center text-[#A78BFA] shrink-0">
+                    <BookOpen size={30} />
+                  </div>
+                  <div className="flex items-end justify-center gap-1.5 h-6" aria-hidden="true">
+                    <span className="audifox-wave-bar w-1.5 h-2.5 rounded-full bg-[#8B5CF6]/55" style={{ animationDelay: '0ms' }} />
+                    <span className="audifox-wave-bar w-1.5 h-4 rounded-full bg-[#8B5CF6]/75" style={{ animationDelay: '180ms' }} />
+                    <span className="audifox-wave-bar w-1.5 h-6 rounded-full bg-gradient-to-t from-[#7C3AED] to-[#A855F7]" style={{ animationDelay: '360ms' }} />
+                    <span className="audifox-wave-bar w-1.5 h-3.5 rounded-full bg-[#8B5CF6]/80" style={{ animationDelay: '540ms' }} />
+                    <span className="audifox-wave-bar w-1.5 h-5 rounded-full bg-[#8B5CF6]/90" style={{ animationDelay: '720ms' }} />
+                    <span className="audifox-wave-bar w-1.5 h-3 rounded-full bg-[#8B5CF6]/60" style={{ animationDelay: '900ms' }} />
+                  </div>
+                </div>
 
-        {/* Bundled Sub-Chapter Quick-Jump Markers */}
-        {!isLocked && subChapters.length >= 2 && (
-          <div className={`mb-6 p-3 rounded-xl border ${panelClasses[theme]}`}>
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-xs font-semibold flex items-center gap-1.5 opacity-80">
-                <ListOrdered size={14} className="text-indigo-400" />
-                Mục lục nhanh ({subChapters.length} phần)
-              </span>
-              <select
-                value=""
-                onChange={(e) => {
-                  const idx = parseInt(e.target.value, 10);
-                  if (!Number.isNaN(idx)) seekToChunk(idx, true);
-                }}
-                className={`text-xs rounded-lg border px-2 py-1 max-w-[180px] ${
+                <div className="space-y-3">
+                  <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">
+                    Bắt đầu hành trình nghe truyện
+                  </h2>
+                  <p className="text-sm sm:text-[15px] text-[#9CA3AF] leading-[1.7] max-w-lg mx-auto lg:mx-0">
+                    Dán liên kết chương truyện để tự động trích xuất nội dung, dùng nút Bookmarklet 1-Click cho trang cần đăng nhập, hoặc dán trực tiếp văn bản / tải file <code className="px-1.5 py-0.5 rounded bg-black/25 text-xs">.txt</code> / <code className="px-1.5 py-0.5 rounded bg-black/25 text-xs">.epub</code>.
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center lg:items-start justify-center lg:justify-start gap-3 pt-1">
+                  <button
+                    onClick={() => {
+                      setInputMode('url');
+                      setTimeout(() => urlInputRef.current?.focus(), 50);
+                    }}
+                    className="w-full sm:w-auto min-h-[44px] px-6 py-2.5 rounded-full bg-gradient-to-r from-[#8B5CF6] via-[#7C3AED] to-[#A855F7] hover:opacity-95 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-opacity"
+                  >
+                    <Link2 size={16} /> Dán URL truyện
+                  </button>
+                  <button
+                    onClick={() => setInputMode('text')}
+                    className={`w-full sm:w-auto min-h-[44px] px-6 py-2.5 rounded-full border text-sm font-medium inline-flex items-center justify-center gap-2 transition-colors hover:border-[#8B5CF6]/50 ${panelClasses[theme]}`}
+                  >
+                    <Upload size={16} /> Nhập văn bản
+                  </button>
+                </div>
+              </div>
+
+              {/* Right Column: Supported Sources & Quick Guide with Keycaps */}
+              <div
+                className={`lg:col-span-5 rounded-2xl border p-5 sm:p-6 space-y-5 text-left ${
                   theme === 'dark'
-                    ? 'bg-gray-800 border-gray-700 text-white'
-                    : theme === 'sepia'
-                      ? 'bg-amber-50 border-amber-300 text-amber-900'
-                      : 'bg-white border-gray-300 text-gray-900'
+                    ? 'bg-[#12141E]/85 border-white/[0.06]'
+                    : 'bg-black/5 border-current/15'
                 }`}
               >
-                <option value="">Nhảy tới...</option>
-                {subChapters.map((sc, i) => (
-                  <option key={i} value={sc.chunkIndex}>
-                    {sc.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {subChapters.map((sc, i) => (
-                <button
-                  key={i}
-                  onClick={() => seekToChunk(sc.chunkIndex, true)}
-                  className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
-                    activeParagraph >= sc.paragraphIndex &&
-                    (i === subChapters.length - 1 || activeParagraph < subChapters[i + 1].paragraphIndex)
-                      ? 'bg-indigo-600 border-indigo-600 text-white font-medium'
-                      : 'border-current/20 hover:border-indigo-400 hover:text-indigo-400'
-                  }`}
-                >
-                  {sc.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-[#A78BFA] mb-3">
+                    Nguồn truyện hỗ trợ
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    {['tieuthuyetmang.com', 'truyenfull.vn', 'metruyencv.com', 'tangthuvien.vn', '.txt / .epub'].map((site) => (
+                      <span
+                        key={site}
+                        className={`px-2.5 py-1 rounded-full border ${
+                          theme === 'dark'
+                            ? 'bg-white/[0.04] border-white/[0.07] text-[#F3F4F6]/85'
+                            : 'bg-white/60 border-current/15'
+                        }`}
+                      >
+                        {site}
+                      </span>
+                    ))}
+                  </div>
+                </div>
 
-        {/* Locked / Login Required State */}
-        {isLocked ? (
-          <div className={`rounded-2xl border p-8 text-center space-y-4 ${panelClasses[theme]}`}>
-            <div className="mx-auto w-12 h-12 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center">
-              <Lock size={24} />
+                <div className="border-t border-white/[0.06] pt-4 space-y-2.5 text-[13px] leading-[1.7] text-[#9CA3AF]">
+                  <div className="font-semibold text-[#F3F4F6]">Hướng dẫn nhanh</div>
+                  <p>
+                    <strong className="text-[#F3F4F6]">Nút đọc 1-Click:</strong> Gửi chương đang đăng nhập sang Audifox trong 1 chạm.
+                  </p>
+                  <p>
+                    <strong className="text-[#F3F4F6]">Tủ truyện:</strong> Tự động lưu tiến độ và đồng bộ giữa các thiết bị.
+                  </p>
+                  <div className="pt-0.5 flex flex-wrap items-center gap-1.5">
+                    <strong className="text-[#F3F4F6] mr-1">Phím tắt:</strong>
+                    <kbd className="inline-flex items-center bg-white/[0.06] border border-white/15 border-b-2 rounded-md px-1.5 py-0.5 text-xs font-mono text-[#F3F4F6]">
+                      Space
+                    </kbd>
+                    <span>Phát/Dừng</span>
+                    <span className="opacity-40">·</span>
+                    <kbd className="inline-flex items-center bg-white/[0.06] border border-white/15 border-b-2 rounded-md px-1.5 py-0.5 text-xs font-mono text-[#F3F4F6]">
+                      ←
+                    </kbd>
+                    <kbd className="inline-flex items-center bg-white/[0.06] border border-white/15 border-b-2 rounded-md px-1.5 py-0.5 text-xs font-mono text-[#F3F4F6]">
+                      →
+                    </kbd>
+                    <span>Tua đoạn</span>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <h2 className="text-lg font-bold">Chương này đang bị khóa</h2>
-              <p className="text-sm opacity-75 max-w-md mx-auto">
-                {lockedReason === 'LOGIN_REQUIRED'
-                  ? `Trang ${sourceDomain || 'nguồn'} yêu cầu đăng nhập tài khoản để đọc chương này. Tự động chuyển chương đã được tạm dừng.`
-                  : 'Không thể trích xuất nội dung chương này.'}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
-              {urlInput && (
-                <a
-                  href={urlInput}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <ExternalLink size={15} /> Mở trang gốc để đăng nhập
-                </a>
-              )}
-              <button
-                onClick={() => setShowBookmarklet(true)}
-                className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-black text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
-              >
-                <Zap size={15} /> Nút đọc 1-Click (Bookmarklet)
-              </button>
-              <button
-                onClick={handlePasteClipboardAndPlay}
-                className={`px-4 py-2 rounded-lg border text-sm font-medium ${panelClasses[theme]} inline-flex items-center gap-1.5`}
-              >
-                <ClipboardPaste size={15} /> Dán & Phát ngay
-              </button>
-              {urlInput && (
-                <button
-                  onClick={() => loadChapterByUrl(urlInput, false, false)}
-                  className={`px-3 py-2 rounded-lg border text-sm font-medium ${panelClasses[theme]} inline-flex items-center gap-1`}
-                >
-                  <RotateCcw size={14} /> Thử lại
-                </button>
-              )}
-            </div>
-          </div>
-        ) : paragraphs.length > 0 ? (
-          <article
-            ref={contentRef}
-            className={`max-w-[72ch] mx-auto space-y-5 leading-[1.85] ${fontFamilyMap[fontFamily]}`}
-            style={{ fontSize: `${fontSize}px` }}
-          >
-            {paragraphs.map((para, idx) => {
-              const isActive = idx === activeParagraph;
-              return (
-                <p
-                  key={idx}
-                  ref={(el) => { paragraphRefs.current[idx] = el; }}
-                  onClick={() => handleParagraphClick(idx)}
-                  className={`group relative cursor-pointer break-words rounded-lg px-3 sm:px-3.5 py-2.5 border-l-2 transition-all duration-200 ${
-                    isActive
-                      ? theme === 'dark'
-                        ? 'border-indigo-400 bg-indigo-500/15 text-indigo-100 shadow-sm'
-                        : theme === 'sepia'
-                          ? 'border-amber-700 bg-amber-900/10 text-amber-950 shadow-sm'
-                          : 'border-indigo-600 bg-indigo-50 text-indigo-950 shadow-sm'
-                      : 'border-transparent hover:border-indigo-400/40 hover:bg-gray-500/10'
-                  }`}
-                >
-                  {para.normalize('NFC')}
-                  <span className="ml-2 inline-block text-[11px] font-sans font-medium opacity-0 group-hover:opacity-70 text-indigo-400 transition-opacity select-none">
-                    ▶ Đọc từ đoạn này
-                  </span>
-                </p>
-              );
-            })}
-          </article>
-        ) : (
-          <div className="flex flex-col items-center justify-center py-24 opacity-30">
-            <BookOpen size={64} className="mb-4" />
-            <p className="text-lg">Dán URL hoặc văn bản để bắt đầu nghe sách</p>
-            <p className="text-sm mt-1">Hỗ trợ hầu hết các trang truyện tiếng Việt</p>
           </div>
         )}
       </main>
 
-      {/* ===== BOTTOM PLAYER BAR ===== */}
+      {/* ===== FLOATING RETURN TO ACTIVE PARAGRAPH TRIGGER ===== */}
+      {userScrolledAway && isPlaying && chunks.length > 0 && !oledSleepMode && (
+        <button
+          onClick={scrollToActiveParagraph}
+          className="fixed bottom-44 sm:bottom-36 right-4 sm:right-8 z-40 px-3.5 py-2 rounded-full bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-semibold shadow-lg flex items-center gap-1.5 transition-all"
+        >
+          <Crosshair size={14} /> Quay về đoạn đang đọc
+        </button>
+      )}
+
+      {/* ===== ZONE 3: BOTTOM PLAYER BAR ===== */}
       {chunks.length > 0 && (
         <div
           className={`fixed bottom-0 inset-x-0 z-40 border-t ${
             theme === 'dark' ? 'bg-[#1B1D2B]/95 border-white/10' : panelClasses[theme]
           } player-bar pb-[env(safe-area-inset-bottom)]`}
         >
-          <div className="max-w-4xl mx-auto px-3 sm:px-5 pt-2.5 pb-2.5 space-y-2.5">
+          <div className="max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-10 pt-2.5 pb-2.5 space-y-2.5">
             {/* Centered Chapter Title */}
             {title && (
               <div className="text-center text-xs sm:text-sm font-medium text-[#F3F4F6] truncate px-2">
@@ -1898,10 +2166,16 @@ export default function AudiobookApp() {
               </button>
               <button
                 onClick={togglePlayPause}
-                className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-gradient-to-br from-[#8B5CF6] to-[#7C5DFA] hover:scale-105 text-white flex items-center justify-center transition-transform shadow-[0_0_20px_rgba(139,92,246,0.4)] shrink-0"
+                className="w-11 h-11 sm:w-12 sm:h-12 rounded-full bg-gradient-to-br from-[#8B5CF6] via-[#7C3AED] to-[#A855F7] hover:scale-[1.03] text-white flex items-center justify-center transition-all duration-200 shadow-md shrink-0"
                 aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
               >
-                {isPlaying ? <Pause size={22} /> : <Play size={22} className="ml-0.5" />}
+                {isSynthesizing ? (
+                  <Loader2 size={20} className="animate-spin" />
+                ) : isPlaying ? (
+                  <Pause size={22} />
+                ) : (
+                  <Play size={22} className="ml-0.5" />
+                )}
               </button>
               <button
                 onClick={skipNext}
@@ -1924,7 +2198,7 @@ export default function AudiobookApp() {
               <div className="flex items-center gap-2 flex-wrap">
                 <select
                   value={voice}
-                  onChange={e => setVoice(e.target.value)}
+                  onChange={e => handleVoiceChange(e.target.value)}
                   className={`min-w-0 max-w-[130px] sm:max-w-none text-xs rounded-lg border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#8B5CF6] ${theme === 'dark' ? 'bg-[#252525] border-white/10 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}
                 >
                   {VOICES.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}
@@ -1932,7 +2206,7 @@ export default function AudiobookApp() {
 
                 <select
                   value={speed}
-                  onChange={e => setSpeed(parseFloat(e.target.value))}
+                  onChange={e => handleSpeedChange(parseFloat(e.target.value))}
                   className={`text-xs rounded-lg border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#8B5CF6] ${theme === 'dark' ? 'bg-[#252525] border-white/10 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}
                 >
                   {SPEED_OPTIONS.map(s => <option key={s} value={s}>{s}x</option>)}

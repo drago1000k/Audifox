@@ -182,6 +182,9 @@ export default function BookmarkletModal({ isOpen, onClose, theme }: Bookmarklet
             <Bookmark size={15} />
             Đọc trên Audifox
           </a>
+          <p className="text-[11px] opacity-65 mt-2.5">
+            Mẹo: Lưu dấu trang trực tiếp từ trang Audifox giúp trình duyệt nhận biểu tượng <code className="px-1 bg-black/20 rounded">/logo.png</code> làm favicon (một số trang truyện nghiêm ngặt có thể hiển thị icon mặc định).
+          </p>
         </div>
 
         {/* Mobile Instructions */}

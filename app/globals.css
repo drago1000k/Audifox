@@ -88,3 +88,26 @@ html.sepia .sentence-active {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
+
+/* ===== CALM WAVEFORM MOTION ===== */
+@keyframes waveBar {
+  0%, 100% {
+    transform: scaleY(0.55);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 0.95;
+  }
+}
+
+.audifox-wave-bar {
+  transform-origin: bottom;
+  animation: waveBar 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .audifox-wave-bar {
+    animation: none;
+  }
+}
