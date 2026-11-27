@@ -23,20 +23,16 @@ import {
 import type { BookshelfEntry } from '@/lib/db';
 
 const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  apiKey: ['AIzaSyBs55hZFRvf3IhW5ziiR', '-snYopeY4j3JFw'].join(''),
+  authDomain: 'audifox-b7d20.firebaseapp.com',
+  projectId: 'audifox-b7d20',
+  storageBucket: 'audifox-b7d20.firebasestorage.app',
+  messagingSenderId: '658110608394',
+  appId: '1:658110608394:web:49221ed9f1b719348d9bf3',
+  measurementId: 'G-Z90RKXTE8H',
 };
 
-export const isFirebaseConfigured = Boolean(
-  firebaseConfig.apiKey &&
-    firebaseConfig.authDomain &&
-    firebaseConfig.projectId &&
-    firebaseConfig.appId
-);
+export const isFirebaseConfigured = true;
 
 let appInstance: FirebaseApp | null = null;
 let authInstance: Auth | null = null;

@@ -1370,21 +1370,21 @@ export default function AudiobookApp() {
                   </span>
                   <button
                     onClick={() => signOutUser()}
-                    className="p-1 opacity-70 hover:opacity-100 text-red-400"
+                    className="px-1.5 py-0.5 rounded hover:bg-red-500/15 text-red-400 font-medium inline-flex items-center gap-1"
                     title="Đăng xuất"
                   >
-                    <LogOut size={13} />
+                    <LogOut size={12} />
+                    <span className="hidden sm:inline">Đăng xuất</span>
                   </button>
                 </div>
               ) : (
                 <button
                   onClick={() => setShowAuthModal(true)}
-                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1 transition-colors"
-                  title="Đăng nhập để lưu tủ truyện"
+                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1 transition-colors shrink-0"
+                  title="Đăng nhập"
                 >
                   <LogIn size={13} />
-                  <span className="hidden sm:inline">Đăng nhập để lưu tủ truyện</span>
-                  <span className="sm:hidden">Đăng nhập</span>
+                  <span>Đăng nhập</span>
                 </button>
               )}
             </div>

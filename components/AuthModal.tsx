@@ -3,7 +3,6 @@
 import React, { useState } from 'react';
 import { X, Mail, Lock, LogIn, UserPlus, AlertCircle, Loader2 } from 'lucide-react';
 import {
-  isFirebaseConfigured,
   signInWithGoogle,
   signInWithEmail,
   signUpWithEmail,
@@ -114,104 +113,92 @@ export default function AuthModal({ isOpen, onClose, theme }: AuthModalProps) {
           Lưu tiến độ đọc & tủ truyện lên đám mây để đồng bộ giữa điện thoại và máy tính.
         </p>
 
-        {!isFirebaseConfigured ? (
-          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs sm:text-sm space-y-2">
-            <div className="font-semibold text-amber-400">Chế độ Khách (Local)</div>
-            <p className="opacity-85">
-              Firebase chưa được cấu hình (<code className="px-1 bg-black/20 rounded">NEXT_PUBLIC_FIREBASE_*</code>).
-              Tiến độ của bạn vẫn được lưu an toàn trong IndexedDB trên thiết bị này.
-            </p>
+        {/* Google Sign-In */}
+        <button
+          onClick={handleGoogle}
+          disabled={loading}
+          className="w-full py-2.5 px-4 rounded-xl bg-white text-gray-900 border border-gray-300 hover:bg-gray-100 font-semibold text-sm flex items-center justify-center gap-2 transition-colors shadow-sm disabled:opacity-50 mb-4"
+        >
+          <span className="font-bold text-base text-indigo-600">G</span>
+          Tiếp tục với Google
+        </button>
+
+        <div className="relative flex items-center justify-center mb-4">
+          <div className="border-t border-current/15 w-full" />
+          <span className="px-3 text-xs opacity-50 whitespace-nowrap">hoặc dùng Email</span>
+          <div className="border-t border-current/15 w-full" />
+        </div>
+
+        {/* Email/Password Tabs */}
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-black/15 mb-4">
+          <button
+            type="button"
+            onClick={() => { setMode('login'); setError(''); }}
+            className={`py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
+              mode === 'login' ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
+            }`}
+          >
+            Đăng nhập
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMode('register'); setError(''); }}
+            className={`py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
+              mode === 'register' ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
+            }`}
+          >
+            Đăng ký tài khoản mới
+          </button>
+        </div>
+
+        <form onSubmit={handleEmailSubmit} className="space-y-3">
+          <div className="relative">
+            <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email của bạn"
+              className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${inputCls}`}
+            />
           </div>
-        ) : (
-          <>
-            {/* Google Sign-In */}
-            <button
-              onClick={handleGoogle}
-              disabled={loading}
-              className="w-full py-2.5 px-4 rounded-xl bg-white text-gray-900 border border-gray-300 hover:bg-gray-100 font-semibold text-sm flex items-center justify-center gap-2 transition-colors shadow-sm disabled:opacity-50 mb-4"
-            >
-              <span className="font-bold text-base text-indigo-600">G</span>
-              Tiếp tục với Google
-            </button>
 
-            <div className="relative flex items-center justify-center mb-4">
-              <div className="border-t border-current/15 w-full" />
-              <span className="px-3 text-xs opacity-50 whitespace-nowrap">hoặc dùng Email</span>
-              <div className="border-t border-current/15 w-full" />
+          <div className="relative">
+            <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
+            <input
+              type="password"
+              required
+              minLength={6}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Mật khẩu (tối thiểu 6 ký tự)"
+              className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${inputCls}`}
+            />
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg p-2.5">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" />
+              <span>{error}</span>
             </div>
+          )}
 
-            {/* Email/Password Tabs */}
-            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-black/15 mb-4">
-              <button
-                type="button"
-                onClick={() => { setMode('login'); setError(''); }}
-                className={`py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
-                  mode === 'login' ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
-                }`}
-              >
-                Đăng nhập
-              </button>
-              <button
-                type="button"
-                onClick={() => { setMode('register'); setError(''); }}
-                className={`py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
-                  mode === 'register' ? 'bg-indigo-600 text-white' : 'opacity-70 hover:opacity-100'
-                }`}
-              >
-                Đăng ký tài khoản mới
-              </button>
-            </div>
-
-            <form onSubmit={handleEmailSubmit} className="space-y-3">
-              <div className="relative">
-                <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="Email của bạn"
-                  className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${inputCls}`}
-                />
-              </div>
-
-              <div className="relative">
-                <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 opacity-50" />
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Mật khẩu (tối thiểu 6 ký tự)"
-                  className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${inputCls}`}
-                />
-              </div>
-
-              {error && (
-                <div className="flex items-start gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg p-2.5">
-                  <AlertCircle size={14} className="shrink-0 mt-0.5" />
-                  <span>{error}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
-              >
-                {loading ? (
-                  <Loader2 size={16} className="animate-spin" />
-                ) : mode === 'login' ? (
-                  <LogIn size={16} />
-                ) : (
-                  <UserPlus size={16} />
-                )}
-                {mode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}
-              </button>
-            </form>
-          </>
-        )}
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+          >
+            {loading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : mode === 'login' ? (
+              <LogIn size={16} />
+            ) : (
+              <UserPlus size={16} />
+            )}
+            {mode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}
+          </button>
+        </form>
       </div>
     </div>
   );
