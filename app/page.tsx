@@ -4,10 +4,22 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Play, Pause, SkipForward, SkipBack, Volume2, VolumeX,
   Moon, Sun, BookOpen, Upload, Link2, RotateCcw,
-  Timer, Music2, Download, Settings2, X, Check, AlertCircle, Loader2,
-  List, Lock, ExternalLink, Zap, ClipboardPaste
+  Timer, Download, Settings2, X, Check, AlertCircle, Loader2,
+  List, Lock, ExternalLink, Zap, ClipboardPaste, BookMarked, ListOrdered,
+  LogIn, LogOut, Cloud
 } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import BookmarkletModal from '@/components/BookmarkletModal';
+import PronunciationModal from '@/components/PronunciationModal';
+import BookshelfModal from '@/components/BookshelfModal';
+import AuthModal from '@/components/AuthModal';
+import {
+  subscribeAuth,
+  signOutUser,
+  fetchCloudBookshelf,
+  upsertCloudBookshelfEntry,
+  deleteCloudBookshelfEntry,
+} from '@/lib/firebase';
 import {
   splitIntoParagraphs,
   buildParagraphChunks,
@@ -15,6 +27,10 @@ import {
   speedToRate,
   pitchToHz,
   estimateMinutes,
+  applyPronunciationRules,
+  detectSubChapters,
+  PronunciationRule,
+  SubChapterMarker,
 } from '@/lib/textUtils';
 import {
   saveSession,
@@ -22,10 +38,14 @@ import {
   clearSession,
   cacheChapter,
   getCachedChapter,
+  deriveSeriesKey,
+  saveToBookshelf,
+  listBookshelf,
+  deleteFromBookshelf,
   SessionData,
   CachedChapter,
+  BookshelfEntry,
 } from '@/lib/db';
-import { startAmbient, AmbientType, AmbientController } from '@/lib/ambientAudio';
 
 type Theme = 'dark' | 'sepia' | 'light';
 type FontFamily = 'sans' | 'serif' | 'mono';
@@ -48,6 +68,16 @@ export default function AudiobookApp() {
   const [showSettings, setShowSettings] = useState(false);
   const [showBlacklist, setShowBlacklist] = useState(false);
   const [showBookmarklet, setShowBookmarklet] = useState(false);
+  const [showPronunciation, setShowPronunciation] = useState(false);
+  const [showBookshelf, setShowBookshelf] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const userRef = useRef<User | null>(null);
+  const [oledSleepMode, setOledSleepMode] = useState(false);
+  const [pronunciationRules, setPronunciationRules] = useState<PronunciationRule[]>([]);
+  const pronunciationRulesRef = useRef<PronunciationRule[]>([]);
+  const [bookshelfItems, setBookshelfItems] = useState<BookshelfEntry[]>([]);
+  const [subChapters, setSubChapters] = useState<SubChapterMarker[]>([]);
   const [blacklistText, setBlacklistText] = useState('');
   const [inputMode, setInputMode] = useState<'url' | 'text'>('url');
   const [urlInput, setUrlInput] = useState('');
@@ -104,13 +134,10 @@ export default function AudiobookApp() {
   const chunkToParagraphRef = useRef<number[]>([]);
   const hasTitleChunkRef = useRef(false);
   const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const playChunkRef = useRef<(index: number) => void>(() => {});
+  const playbackGenRef = useRef(0);
+  const playChunkRef = useRef<(index: number, gen?: number) => void>(() => {});
   const persistNowRef = useRef<(overrideChunk?: number) => void>(() => {});
-
-  // --- Ambient ---
-  const [ambientType, setAmbientType] = useState<AmbientType>('none');
-  const [ambientVolume, setAmbientVolume] = useState(0.15);
-  const ambientController = useRef<AmbientController | null>(null);
+  const cloudSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- Sleep Timer ---
   const [sleepTimer, setSleepTimer] = useState<SleepTimerOption>('none');
@@ -119,6 +146,7 @@ export default function AudiobookApp() {
   // --- Loading/Error State ---
   const [isFetching, setIsFetching] = useState(false);
   const [fetchError, setFetchError] = useState('');
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [clipboardImportReady, setClipboardImportReady] = useState(false);
   const [resumeBanner, setResumeBanner] = useState<{ session: SessionData; totalChunks: number } | null>(null);
   const [playlist, setPlaylist] = useState<{ title: string; url: string }[]>([]);
@@ -187,6 +215,129 @@ export default function AudiobookApp() {
     restoreSavedSession(resumeBanner.session, 0);
   }
 
+  // Load pronunciation rules & bookshelf on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('audifox_pronunciation_rules');
+      if (raw) {
+        const parsed = JSON.parse(raw) as PronunciationRule[];
+        if (Array.isArray(parsed)) {
+          setPronunciationRules(parsed);
+          pronunciationRulesRef.current = parsed;
+        }
+      }
+    } catch {}
+    listBookshelf().then(setBookshelfItems).catch(() => {});
+
+    // Firebase Auth + Auto-Merge Local <-> Cloud Bookshelf
+    const unsubscribe = subscribeAuth(async (authUser) => {
+      setUser(authUser);
+      userRef.current = authUser;
+      if (!authUser) return;
+
+      try {
+        const [localItems, cloudItems] = await Promise.all([
+          listBookshelf(),
+          fetchCloudBookshelf(authUser.uid),
+        ]);
+
+        const merged = new Map<string, BookshelfEntry>();
+        for (const item of localItems) merged.set(item.seriesKey, item);
+        for (const cloudItem of cloudItems) {
+          const existing = merged.get(cloudItem.seriesKey);
+          if (!existing || cloudItem.updatedAt > existing.updatedAt) {
+            merged.set(cloudItem.seriesKey, {
+              ...cloudItem,
+              content: existing?.url === cloudItem.url ? existing.content : cloudItem.content,
+            });
+          }
+        }
+
+        const mergedList = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+        setBookshelfItems(mergedList);
+
+        // Push newer local entries to Firestore and persist newer cloud entries to IndexedDB
+        await Promise.all(
+          mergedList.map(async (item) => {
+            await saveToBookshelf(item).catch(() => {});
+            const cloudMatch = cloudItems.find((c) => c.seriesKey === item.seriesKey);
+            if (!cloudMatch || item.updatedAt > cloudMatch.updatedAt) {
+              await upsertCloudBookshelfEntry(authUser.uid, item).catch(() => {});
+            }
+          })
+        );
+      } catch {}
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  function handleSavePronunciationRules(next: PronunciationRule[]) {
+    setPronunciationRules(next);
+    pronunciationRulesRef.current = next;
+    blobCache.current.clear(); // clear cached TTS blobs so new rules apply immediately
+    try {
+      localStorage.setItem('audifox_pronunciation_rules', JSON.stringify(next));
+    } catch {}
+  }
+
+  async function handleResumeBookshelf(entry: BookshelfEntry) {
+    setShowBookshelf(false);
+    setResumeBanner(null);
+    hardResetAudio();
+    setIsLocked(false);
+    setLockedReason(null);
+    setFetchError('');
+
+    setVoice(entry.voice || 'vi-VN-HoaiMyNeural');
+    setSpeed(entry.rate || 1.0);
+    setPitch(entry.pitch ?? 0);
+
+    // If synced from Firestore without local content, fetch chapter from URL and jump to saved chunk
+    if (!entry.content && entry.url) {
+      setUrlInput(entry.url);
+      setIsFetching(true);
+      try {
+        const data = await getOrFetchChapter(entry.url);
+        setTitle(data.title);
+        setNextUrl(data.nextUrl);
+        setPrevUrl(data.prevUrl);
+        setSourceDomain(data.sourceDomain);
+        if (data.locked) {
+          setIsLocked(true);
+          setLockedReason(data.reason || 'LOGIN_REQUIRED');
+          return;
+        }
+        setContent(data.content);
+        processContent(data.content, entry.chunkIndex, data.title);
+        setTimeout(() => startPlayback(entry.chunkIndex), 80);
+      } catch (err: unknown) {
+        setFetchError(err instanceof Error ? err.message : 'Không thể tải chương từ tủ truyện');
+      } finally {
+        setIsFetching(false);
+      }
+      return;
+    }
+
+    setTitle(entry.chapterTitle.normalize('NFC'));
+    setContent(entry.content.normalize('NFC'));
+    setNextUrl(entry.nextUrl);
+    setPrevUrl(entry.prevUrl);
+    setSourceDomain(entry.sourceDomain || '');
+    setUrlInput(entry.url || '');
+
+    processContent(entry.content, entry.chunkIndex, entry.chapterTitle);
+    setTimeout(() => startPlayback(entry.chunkIndex), 80);
+  }
+
+  async function handleDeleteBookshelf(seriesKey: string) {
+    await deleteFromBookshelf(seriesKey).catch(() => {});
+    if (userRef.current) {
+      await deleteCloudBookshelfEntry(userRef.current.uid, seriesKey).catch(() => {});
+    }
+    listBookshelf().then(setBookshelfItems).catch(() => {});
+  }
+
   // ========== CONTENT PROCESSING ==========
   function processContent(text: string, startChunk = 0, chapterTitle = ''): number {
     const blacklist = blacklistText.split('\n').filter(Boolean);
@@ -199,10 +350,12 @@ export default function AudiobookApp() {
       hasTitleChunk,
     } = buildParagraphChunks(newParagraphs, 450, chapterTitle);
 
+    const detectedSubs = detectSubChapters(newParagraphs, pToC);
     const clampedStart = Math.max(0, Math.min(startChunk, Math.max(0, newChunks.length - 1)));
 
     hasTitleChunkRef.current = hasTitleChunk;
     setParagraphs(newParagraphs);
+    setSubChapters(detectedSubs);
     setChunks(newChunks);
     chunksRef.current = newChunks;
     setParagraphToChunkStart(pToC);
@@ -337,8 +490,30 @@ export default function AudiobookApp() {
     await loadChapterByUrl(targetPrev, isPlayingRef.current, false);
   }
 
+  function hardResetAudio() {
+    playbackGenRef.current += 1;
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+    setAutoplayBlocked(false);
+    if (pauseTimerRef.current) {
+      clearTimeout(pauseTimerRef.current);
+      pauseTimerRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
+    }
+    blobCache.current.forEach((url) => URL.revokeObjectURL(url));
+    blobCache.current.clear();
+    fetchingRef.current.clear();
+    retryCount.current.clear();
+    currentChunkRef.current = 0;
+    setCurrentChunk(0);
+  }
+
   function importAndPlayChapter(rawTitle: string, rawContent: string, sourceUrl = '') {
-    stopPlayback();
+    hardResetAudio();
     setFetchError('');
     setIsLocked(false);
     setLockedReason(null);
@@ -537,11 +712,12 @@ export default function AudiobookApp() {
     const retries = retryCount.current.get(chunkIndex) || 0;
 
     try {
+      const spokenText = applyPronunciationRules(chunkText, pronunciationRulesRef.current);
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: chunkText,
+          text: spokenText,
           voice,
           rate: speedToRate(speed),
           pitch: pitchToHz(pitch),
@@ -585,8 +761,41 @@ export default function AudiobookApp() {
     } catch {}
   }
 
-  async function playChunk(index: number) {
-    if (!isPlayingRef.current) return;
+  function waitForAudioReady(audio: HTMLAudioElement, gen: number): Promise<void> {
+    if (audio.readyState >= 2) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        audio.removeEventListener('canplay', onReady);
+        audio.removeEventListener('loadeddata', onReady);
+        audio.removeEventListener('error', onError);
+        clearTimeout(timer);
+      };
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('Audio failed to load'));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, 5000);
+
+      if (gen !== playbackGenRef.current) {
+        cleanup();
+        resolve();
+        return;
+      }
+      audio.addEventListener('canplay', onReady);
+      audio.addEventListener('loadeddata', onReady);
+      audio.addEventListener('error', onError);
+    });
+  }
+
+  async function playChunk(index: number, gen = playbackGenRef.current) {
+    if (!isPlayingRef.current || gen !== playbackGenRef.current) return;
     const c = chunksRef.current;
     if (index >= c.length) {
       // Chapter finished
@@ -596,7 +805,10 @@ export default function AudiobookApp() {
         // Wasn't pre-fetched yet
         await prefetchNextChapter();
         if (nextChapterRef.current) loadNextChapter();
-        else setIsPlaying(false);
+        else {
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+        }
       } else {
         setIsPlaying(false);
         isPlayingRef.current = false;
@@ -620,8 +832,9 @@ export default function AudiobookApp() {
       prefetchNextChapter();
     }
 
+    let blobUrl: string;
     try {
-      const blobUrl = await fetchAudioBlob(index, c[index]);
+      blobUrl = await fetchAudioBlob(index, c[index]);
       prefetchChunks(index + 1);
 
       // 1.5s natural pause before reading the chapter title
@@ -630,21 +843,43 @@ export default function AudiobookApp() {
           pauseTimerRef.current = setTimeout(resolve, 1500);
         });
       }
-
-      if (!isPlayingRef.current) return;
-
-      const audio = audioRef.current;
-      if (!audio) return;
-
-      audio.src = blobUrl;
-      audio.playbackRate = speed;
-      audio.volume = volume;
-
-      await audio.play();
     } catch {
-      if (isPlayingRef.current) {
-        // Skip broken chunk
-        setTimeout(() => playChunkRef.current(index + 1), 200);
+      if (isPlayingRef.current && gen === playbackGenRef.current) {
+        // Skip broken TTS chunk
+        setTimeout(() => playChunkRef.current(index + 1, gen), 200);
+      }
+      return;
+    }
+
+    if (!isPlayingRef.current || gen !== playbackGenRef.current) return;
+
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    audio.src = blobUrl;
+    audio.playbackRate = speed;
+    audio.volume = volume;
+    audio.load();
+
+    try {
+      await waitForAudioReady(audio, gen);
+      if (!isPlayingRef.current || gen !== playbackGenRef.current) return;
+      await audio.play();
+      setAutoplayBlocked(false);
+    } catch (playErr: unknown) {
+      if (gen !== playbackGenRef.current) return;
+      const errName = playErr instanceof DOMException ? playErr.name : '';
+      const errMsg = playErr instanceof Error ? playErr.message : String(playErr);
+      if (errName === 'NotAllowedError' || errMsg.includes('NotAllowedError')) {
+        // Browser blocked autoplay without direct user gesture — reset cleanly & show 1-tap play banner
+        playbackGenRef.current += 1;
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setAutoplayBlocked(true);
+        return;
+      }
+      if (isPlayingRef.current && gen === playbackGenRef.current) {
+        setTimeout(() => playChunkRef.current(index + 1, gen), 200);
       }
     }
   }
@@ -692,9 +927,11 @@ export default function AudiobookApp() {
   }
 
   function startPlayback(fromChunk = currentChunkRef.current) {
+    const gen = ++playbackGenRef.current;
+    setAutoplayBlocked(false);
     isPlayingRef.current = true;
     setIsPlaying(true);
-    playChunk(fromChunk);
+    playChunk(fromChunk, gen);
     prefetchChunks(fromChunk);
 
     // Media Session API
@@ -707,6 +944,7 @@ export default function AudiobookApp() {
   }
 
   function stopPlayback() {
+    playbackGenRef.current += 1;
     isPlayingRef.current = false;
     setIsPlaying(false);
     if (pauseTimerRef.current) {
@@ -715,7 +953,8 @@ export default function AudiobookApp() {
     }
     if (audioRef.current) {
       audioRef.current.pause();
-      audioRef.current.src = '';
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
     }
     persistNowRef.current(currentChunkRef.current);
   }
@@ -725,11 +964,13 @@ export default function AudiobookApp() {
       stopPlayback();
     } else {
       setResumeBanner(null);
+      setAutoplayBlocked(false);
       startPlayback(currentChunkRef.current);
     }
   }
 
   function seekToChunk(targetChunk: number, autoPlay = isPlayingRef.current) {
+    const gen = ++playbackGenRef.current;
     const clamped = Math.max(0, Math.min(targetChunk, Math.max(0, chunksRef.current.length - 1)));
     if (pauseTimerRef.current) {
       clearTimeout(pauseTimerRef.current);
@@ -737,10 +978,12 @@ export default function AudiobookApp() {
     }
     if (audioRef.current) {
       audioRef.current.pause();
-      audioRef.current.src = '';
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
     }
 
     setResumeBanner(null);
+    setAutoplayBlocked(false);
     setCurrentChunk(clamped);
     currentChunkRef.current = clamped;
     const pIdx = chunkToParagraphRef.current[clamped] ?? -1;
@@ -750,7 +993,7 @@ export default function AudiobookApp() {
     if (autoPlay) {
       isPlayingRef.current = true;
       setIsPlaying(true);
-      playChunkRef.current(clamped);
+      playChunkRef.current(clamped, gen);
       prefetchChunks(clamped);
     }
   }
@@ -772,6 +1015,54 @@ export default function AudiobookApp() {
     seekToChunk(targetChunk, true);
   }
 
+  // Global PC Keyboard Shortcuts (ignoring inputs/textareas/selects)
+  const shortcutHandlersRef = useRef({
+    togglePlayPause,
+    skipBack,
+    skipNext,
+    handlePrevChapter,
+    handleNextChapter,
+  });
+  shortcutHandlersRef.current = {
+    togglePlayPause,
+    skipBack,
+    skipNext,
+    handlePrevChapter,
+    handleNextChapter,
+  };
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (chunksRef.current.length === 0) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        shortcutHandlersRef.current.togglePlayPause();
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        if (e.shiftKey) shortcutHandlersRef.current.handlePrevChapter();
+        else shortcutHandlersRef.current.skipBack();
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        if (e.shiftKey) shortcutHandlersRef.current.handleNextChapter();
+        else shortcutHandlersRef.current.skipNext();
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   // Audio element event: on ended → play next chunk
   useEffect(() => {
     const audio = new Audio();
@@ -785,13 +1076,16 @@ export default function AudiobookApp() {
       blobCache.current.delete(finishedIdx);
 
       if (isPlayingRef.current) {
+        const gen = playbackGenRef.current;
         // 1.5s natural pause after reading the chapter title
         if (finishedIdx === 0 && hasTitleChunkRef.current) {
           pauseTimerRef.current = setTimeout(() => {
-            if (isPlayingRef.current) playChunkRef.current(finishedIdx + 1);
+            if (isPlayingRef.current && gen === playbackGenRef.current) {
+              playChunkRef.current(finishedIdx + 1, gen);
+            }
           }, 1500);
         } else {
-          playChunkRef.current(finishedIdx + 1);
+          playChunkRef.current(finishedIdx + 1, gen);
         }
       }
     });
@@ -810,18 +1104,20 @@ export default function AudiobookApp() {
     }
   }, [volume, speed]);
 
-  // ========== AUTO-SAVE SESSION (Immediate + beforeunload) ==========
+  // ========== AUTO-SAVE SESSION & BOOKSHELF (Immediate + beforeunload) ==========
   const persistSession = useCallback(
     (overrideChunk?: number) => {
       if (!content) return;
+      const chunkIdx = overrideChunk ?? currentChunkRef.current;
+      const total = chunksRef.current.length;
       saveSession({
         url: urlInput,
         title,
         content,
         nextUrl,
         sourceDomain,
-        chunkIndex: overrideChunk ?? currentChunkRef.current,
-        totalChunks: chunksRef.current.length,
+        chunkIndex: chunkIdx,
+        totalChunks: total,
         voice,
         rate: speed,
         pitch,
@@ -831,8 +1127,36 @@ export default function AudiobookApp() {
         autoNext,
         volume,
       }).catch(() => {});
+
+      const { seriesKey, seriesName } = deriveSeriesKey(urlInput, title);
+      const entryData = {
+        seriesKey,
+        seriesName,
+        url: urlInput,
+        chapterTitle: title || 'Chương đã lưu',
+        content,
+        nextUrl,
+        prevUrl,
+        sourceDomain,
+        chunkIndex: chunkIdx,
+        totalChunks: total,
+        voice,
+        rate: speed,
+        pitch,
+      };
+      saveToBookshelf(entryData)
+        .then(() => listBookshelf().then(setBookshelfItems).catch(() => {}))
+        .catch(() => {});
+
+      if (userRef.current) {
+        const uid = userRef.current.uid;
+        if (cloudSyncTimerRef.current) clearTimeout(cloudSyncTimerRef.current);
+        cloudSyncTimerRef.current = setTimeout(() => {
+          upsertCloudBookshelfEntry(uid, { ...entryData, updatedAt: Date.now() }).catch(() => {});
+        }, 1200);
+      }
     },
-    [urlInput, title, content, nextUrl, sourceDomain, voice, speed, pitch, theme, fontSize, fontFamily, autoNext, volume]
+    [urlInput, title, content, nextUrl, prevUrl, sourceDomain, voice, speed, pitch, theme, fontSize, fontFamily, autoNext, volume]
   );
 
   persistNowRef.current = persistSession;
@@ -853,20 +1177,6 @@ export default function AudiobookApp() {
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
-
-  // ========== AMBIENT SOUND ==========
-  useEffect(() => {
-    ambientController.current?.stop();
-    ambientController.current = null;
-    if (ambientType !== 'none') {
-      ambientController.current = startAmbient(ambientType, ambientVolume);
-    }
-    return () => { ambientController.current?.stop(); };
-  }, [ambientType]);
-
-  useEffect(() => {
-    ambientController.current?.setVolume(ambientVolume);
-  }, [ambientVolume]);
 
   // ========== SLEEP TIMER ==========
   function setSleep(opt: SleepTimerOption) {
@@ -982,6 +1292,20 @@ export default function AudiobookApp() {
               )}
             </div>
             <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+              {/* Bookshelf */}
+              <button
+                onClick={() => setShowBookshelf(true)}
+                className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-indigo-400/60 transition-colors`}
+                title="Tủ truyện"
+              >
+                <BookMarked size={14} className="text-indigo-400" />
+                <span className="hidden sm:inline">Tủ truyện</span>
+                {bookshelfItems.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-indigo-600 text-white text-[10px] leading-4">
+                    {bookshelfItems.length}
+                  </span>
+                )}
+              </button>
               {/* 1-Click Bookmarklet Button */}
               <button
                 onClick={() => setShowBookmarklet(true)}
@@ -1000,6 +1324,17 @@ export default function AudiobookApp() {
                 <ClipboardPaste size={14} className="text-indigo-400" />
                 <span className="hidden sm:inline">Dán & Phát ngay</span>
               </button>
+              {/* OLED Sleep Mode */}
+              {chunks.length > 0 && (
+                <button
+                  onClick={() => setOledSleepMode(true)}
+                  className={`px-2.5 py-1.5 rounded-lg ${panelClasses[theme]} border text-xs font-medium flex items-center gap-1 hover:border-indigo-400/60 transition-colors`}
+                  title="Chế độ ngủ OLED"
+                >
+                  <Moon size={14} className="text-purple-400" />
+                  <span className="hidden md:inline">Ngủ (OLED)</span>
+                </button>
+              )}
               {/* Theme toggle */}
               <button onClick={() => setTheme(t => t === 'dark' ? 'sepia' : t === 'sepia' ? 'light' : 'dark')}
                 className={`p-2 rounded-lg ${panelClasses[theme]} border`} title="Đổi theme">
@@ -1015,6 +1350,41 @@ export default function AudiobookApp() {
                 <button onClick={() => setShowPlaylist(!showPlaylist)}
                   className={`p-2 rounded-lg ${panelClasses[theme]} border`} title="Danh sách chương">
                   <List size={16} />
+                </button>
+              )}
+              {/* Hybrid Auth Trigger / User Badge */}
+              {user ? (
+                <div className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-xs ${panelClasses[theme]}`}>
+                  {user.photoURL ? (
+                    <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full shrink-0" />
+                  ) : (
+                    <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                      {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                    </span>
+                  )}
+                  <span className="hidden md:inline max-w-[110px] truncate font-medium">
+                    {user.displayName || user.email}
+                  </span>
+                  <span className="hidden sm:inline-flex items-center gap-0.5 text-[10px] text-emerald-400">
+                    <Cloud size={11} /> Đã đồng bộ
+                  </span>
+                  <button
+                    onClick={() => signOutUser()}
+                    className="p-1 opacity-70 hover:opacity-100 text-red-400"
+                    title="Đăng xuất"
+                  >
+                    <LogOut size={13} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1 transition-colors"
+                  title="Đăng nhập để lưu tủ truyện"
+                >
+                  <LogIn size={13} />
+                  <span className="hidden sm:inline">Đăng nhập để lưu tủ truyện</span>
+                  <span className="sm:hidden">Đăng nhập</span>
                 </button>
               )}
             </div>
@@ -1118,6 +1488,19 @@ export default function AudiobookApp() {
               </button>
             </div>
           )}
+
+          {/* Autoplay Blocked One-Tap Banner */}
+          {autoplayBlocked && chunks.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-500/15 border border-amber-500/40 px-3 py-2 text-xs sm:text-sm">
+              <span>Trình duyệt chặn tự động phát khi chuyển tab.</span>
+              <button
+                onClick={() => startPlayback(currentChunkRef.current)}
+                className="px-3.5 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shrink-0 flex items-center gap-1.5 shadow"
+              >
+                <Volume2 size={14} /> Nhấn để bắt đầu nghe chương mới
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -1151,6 +1534,14 @@ export default function AudiobookApp() {
             <button onClick={() => setShowBlacklist(true)}
               className={`px-3 py-1 rounded border ${panelClasses[theme]} text-sm`}>
               🚫 Danh sách đen
+            </button>
+            {/* Pronunciation Dictionary */}
+            <button onClick={() => setShowPronunciation(true)}
+              className={`px-3 py-1 rounded border ${panelClasses[theme]} text-sm flex items-center gap-1.5`}>
+              🗣 Từ điển phát âm
+              {pronunciationRules.length > 0 && (
+                <span className="px-1.5 rounded-full bg-indigo-600 text-white text-xs">{pronunciationRules.length}</span>
+              )}
             </button>
           </div>
         </div>
@@ -1232,6 +1623,55 @@ export default function AudiobookApp() {
               >
                 A+
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Bundled Sub-Chapter Quick-Jump Markers */}
+        {!isLocked && subChapters.length >= 2 && (
+          <div className={`mb-6 p-3 rounded-xl border ${panelClasses[theme]}`}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-semibold flex items-center gap-1.5 opacity-80">
+                <ListOrdered size={14} className="text-indigo-400" />
+                Mục lục nhanh ({subChapters.length} phần)
+              </span>
+              <select
+                value=""
+                onChange={(e) => {
+                  const idx = parseInt(e.target.value, 10);
+                  if (!Number.isNaN(idx)) seekToChunk(idx, true);
+                }}
+                className={`text-xs rounded-lg border px-2 py-1 max-w-[180px] ${
+                  theme === 'dark'
+                    ? 'bg-gray-800 border-gray-700 text-white'
+                    : theme === 'sepia'
+                      ? 'bg-amber-50 border-amber-300 text-amber-900'
+                      : 'bg-white border-gray-300 text-gray-900'
+                }`}
+              >
+                <option value="">Nhảy tới...</option>
+                {subChapters.map((sc, i) => (
+                  <option key={i} value={sc.chunkIndex}>
+                    {sc.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {subChapters.map((sc, i) => (
+                <button
+                  key={i}
+                  onClick={() => seekToChunk(sc.chunkIndex, true)}
+                  className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                    activeParagraph >= sc.paragraphIndex &&
+                    (i === subChapters.length - 1 || activeParagraph < subChapters[i + 1].paragraphIndex)
+                      ? 'bg-indigo-600 border-indigo-600 text-white font-medium'
+                      : 'border-current/20 hover:border-indigo-400 hover:text-indigo-400'
+                  }`}
+                >
+                  {sc.label}
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -1349,7 +1789,14 @@ export default function AudiobookApp() {
 
           <div className="max-w-5xl mx-auto px-3 sm:px-4 py-2 sm:py-2.5">
             {/* Row 1: Main controls */}
-            <div className="flex items-center gap-2 sm:gap-3 flex-wrap mb-2">
+            <div className="flex items-center gap-1.5 sm:gap-2.5 flex-wrap mb-2">
+              <button
+                onClick={() => seekToChunk(currentChunkRef.current - 3)}
+                className="px-2 py-1 rounded-lg border border-current/20 text-xs font-semibold hover:bg-white/10 transition-colors shrink-0"
+                title="Lùi 3 đoạn"
+              >
+                −3
+              </button>
               <button onClick={skipBack} className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0" aria-label="Đoạn trước">
                 <SkipBack size={18} />
               </button>
@@ -1362,6 +1809,13 @@ export default function AudiobookApp() {
               </button>
               <button onClick={skipNext} className="p-1.5 rounded-full hover:bg-white/10 transition-colors shrink-0" aria-label="Đoạn tiếp">
                 <SkipForward size={18} />
+              </button>
+              <button
+                onClick={() => seekToChunk(currentChunkRef.current + 3)}
+                className="px-2 py-1 rounded-lg border border-current/20 text-xs font-semibold hover:bg-white/10 transition-colors shrink-0"
+                title="Tiến 3 đoạn"
+              >
+                +3
               </button>
 
               {/* Voice selector */}
@@ -1420,23 +1874,6 @@ export default function AudiobookApp() {
                 </select>
               </div>
 
-              {/* Ambient sound */}
-              <div className="flex items-center gap-1 text-xs">
-                <Music2 size={14} className="opacity-60" />
-                <select value={ambientType} onChange={e => setAmbientType(e.target.value as AmbientType)}
-                  className={`text-xs rounded border px-1.5 py-0.5 focus:outline-none ${theme === 'dark' ? 'bg-gray-800 border-gray-700 text-white' : theme === 'sepia' ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-white border-gray-300 text-gray-900'}`}>
-                  <option value="none">Không có tiếng nền</option>
-                  <option value="rain">🌧 Mưa nhẹ</option>
-                  <option value="brown">🤎 Tiếng ồn nâu</option>
-                  <option value="fire">🔥 Lửa crackling</option>
-                </select>
-                {ambientType !== 'none' && (
-                  <input type="range" min="0" max="0.5" step="0.01" value={ambientVolume}
-                    onChange={e => setAmbientVolume(parseFloat(e.target.value))}
-                    className="w-16 accent-indigo-500" />
-                )}
-              </div>
-
               {/* Export MP3 */}
               <button onClick={exportMp3} title="Xuất MP3"
                 className={`ml-auto flex items-center gap-1 text-xs px-2 py-1 rounded border ${panelClasses[theme]}`}>
@@ -1446,6 +1883,105 @@ export default function AudiobookApp() {
           </div>
         </div>
       )}
+      {/* ===== OLED NIGHT / MINIMALIST SLEEP MODE ===== */}
+      {oledSleepMode && (
+        <div className="fixed inset-0 z-50 bg-black text-neutral-300 flex flex-col justify-between p-5 sm:p-8 select-none">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-neutral-400">
+              <Timer size={14} />
+              <select
+                value={sleepTimer}
+                onChange={(e) => setSleep(e.target.value as SleepTimerOption)}
+                className="bg-neutral-950 border border-neutral-800 text-neutral-300 rounded-lg px-2 py-1 text-xs focus:outline-none"
+              >
+                <option value="none">Hẹn giờ: Tắt</option>
+                <option value="15">Hẹn giờ: 15p</option>
+                <option value="30">Hẹn giờ: 30p</option>
+                <option value="60">Hẹn giờ: 60p</option>
+                <option value="chapter">Hết chương</option>
+              </select>
+            </div>
+            <button
+              onClick={() => setOledSleepMode(false)}
+              className="px-3 py-1.5 rounded-full border border-neutral-800 text-xs text-neutral-400 hover:text-white hover:border-neutral-600 transition-colors"
+            >
+              Thoát chế độ ngủ
+            </button>
+          </div>
+
+          <div className="max-w-xl mx-auto w-full text-center space-y-5 my-auto px-2">
+            {title && (
+              <div className="text-xs uppercase tracking-wider text-neutral-500 truncate">
+                {title.normalize('NFC')}
+              </div>
+            )}
+            <p className="text-base sm:text-xl leading-relaxed text-neutral-200 font-serif">
+              {(chunks[currentChunk] || '').normalize('NFC')}
+            </p>
+            {chunks[currentChunk + 1] && (
+              <p className="text-xs sm:text-sm leading-relaxed text-neutral-600 font-serif line-clamp-3">
+                {chunks[currentChunk + 1].normalize('NFC')}
+              </p>
+            )}
+            <div className="text-xs text-neutral-500 tabular-nums">
+              Đoạn {currentChunk + 1} / {Math.max(1, chunks.length)} · ~{estLeft}p còn lại
+            </div>
+          </div>
+
+          <div className="flex items-center justify-center gap-5 pb-[env(safe-area-inset-bottom)]">
+            <button
+              onClick={() => seekToChunk(currentChunkRef.current - 3)}
+              className="w-14 h-14 rounded-full border border-neutral-800 text-neutral-300 hover:border-neutral-600 text-sm font-semibold flex items-center justify-center"
+              aria-label="Lùi 3 đoạn"
+            >
+              −3
+            </button>
+            <button
+              onClick={togglePlayPause}
+              className="w-20 h-20 rounded-full bg-indigo-950/80 border border-indigo-700/60 text-indigo-200 hover:bg-indigo-900/80 flex items-center justify-center shadow-lg"
+              aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
+            >
+              {isPlaying ? <Pause size={32} /> : <Play size={32} />}
+            </button>
+            <button
+              onClick={() => seekToChunk(currentChunkRef.current + 3)}
+              className="w-14 h-14 rounded-full border border-neutral-800 text-neutral-300 hover:border-neutral-600 text-sm font-semibold flex items-center justify-center"
+              aria-label="Tiến 3 đoạn"
+            >
+              +3
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ===== PRONUNCIATION DICTIONARY MODAL ===== */}
+      <PronunciationModal
+        isOpen={showPronunciation}
+        onClose={() => setShowPronunciation(false)}
+        rules={pronunciationRules}
+        onSaveRules={handleSavePronunciationRules}
+        theme={theme}
+      />
+
+      {/* ===== BOOKSHELF MODAL ===== */}
+      <BookshelfModal
+        isOpen={showBookshelf}
+        onClose={() => setShowBookshelf(false)}
+        items={bookshelfItems}
+        onResumeEntry={handleResumeBookshelf}
+        onDeleteEntry={handleDeleteBookshelf}
+        isLoggedIn={Boolean(user)}
+        onOpenAuth={() => setShowAuthModal(true)}
+        theme={theme}
+      />
+
+      {/* ===== AUTH MODAL ===== */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        theme={theme}
+      />
+
       {/* ===== BOOKMARKLET MODAL ===== */}
       <BookmarkletModal
         isOpen={showBookmarklet}

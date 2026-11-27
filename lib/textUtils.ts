@@ -107,6 +107,60 @@ export function buildParagraphChunks(
   return { chunks, paragraphToChunkStart, chunkToParagraph, hasTitleChunk };
 }
 
+export interface PronunciationRule {
+  id: string;
+  original: string;
+  spoken: string;
+}
+
+// Apply user pronunciation replacements ONLY to TTS input (case-insensitive whole-word)
+export function applyPronunciationRules(text: string, rules: PronunciationRule[]): string {
+  if (!rules || rules.length === 0) return text;
+  let result = text;
+  for (const rule of rules) {
+    const orig = rule.original.trim();
+    const spoken = rule.spoken.trim();
+    if (!orig || !spoken) continue;
+    const escaped = orig.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      const regex = new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'giu');
+      result = result.replace(regex, spoken);
+    } catch {
+      const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
+      result = result.replace(regex, spoken);
+    }
+  }
+  return result;
+}
+
+export interface SubChapterMarker {
+  label: string;
+  paragraphIndex: number;
+  chunkIndex: number;
+}
+
+// Detect bundled sub-chapter headings inside a chapter (e.g. Chương 1, Hồi 2, Chapter 3)
+export function detectSubChapters(
+  paragraphs: string[],
+  paragraphToChunkStart: number[]
+): SubChapterMarker[] {
+  const markers: SubChapterMarker[] = [];
+  const headingPattern = /^(?:chương|hồi|chapter|phần|tập)\s+\d+(?:[\s:.\-–—]+[^\n]{0,60})?$/i;
+
+  paragraphs.forEach((para, pIdx) => {
+    const trimmed = para.trim();
+    if (trimmed.length <= 90 && headingPattern.test(trimmed)) {
+      markers.push({
+        label: trimmed,
+        paragraphIndex: pIdx,
+        chunkIndex: paragraphToChunkStart[pIdx] ?? 0,
+      });
+    }
+  });
+
+  return markers;
+}
+
 // Split text into TTS-friendly chunks (350–500 chars, break at sentence boundaries)
 export function splitIntoChunks(text: string, maxLen = 450): string[] {
   const chunks: string[] = [];
