@@ -1,14 +1,18 @@
 # Audifox
 
-Audifox is a Vietnamese web-novel audio reader built with Next.js. Paste a chapter URL (or text) and Audifox cleans the content and reads it aloud with natural Microsoft Edge neural voices, highlighting the active paragraph as it goes.
+Audifox is a Vietnamese web-novel audio reader built with Next.js. Paste a chapter URL (or send a logged-in chapter with the 1-Click Bookmarklet) and Audifox cleans the content and reads it aloud with natural Microsoft Edge neural voices, highlighting the active paragraph and spoken phrases as it goes.
 
 ## Features
 
 - **Read aloud** with Vietnamese neural voices (`vi-VN-HoaiMyNeural`, `vi-VN-NamMinhNeural`), adjustable speed and pitch
-- **Chapter fetching** from supported sources (`tieuthuyetmang.com`) with next/previous chapter navigation and auto-next
-- **Paragraph highlighting** with smooth auto-scroll and click-to-read-from-here
+- **Chapter fetching** from supported sources (`tieuthuyetmang.com`, `lanagarden.com`) with next/previous chapter navigation and auto-next
+- **Paragraph & live phrase highlighting** locked to actual audio playback (`audio.currentTime / audio.duration`), with smooth auto-scroll and click-to-read-from-here
 - **Reader sidebar** with chapter / sub-chapter index, reading history, and bookshelf (`Tủ truyện`)
-- **1-click bookmarklet** to send a logged-in chapter from the source site into Audifox (PC and mobile)
+- **1-click bookmarklet & cross-tab reader bridge** (`PC` & mobile):
+  - Extracts logged-in chapters (including `lanagarden.com/reader/*`) and syncs them into Audifox via `BroadcastChannel`, `window.postMessage`, and clipboard fallback
+  - Floating control bar on the source page with an **`Auto Next: ON / OFF`** toggle, manual **`Chương tiếp ▶`** button, and live sync status
+  - Strict forward chapter progression (`Chương N + 1` in the chapter list or `"Sau"` / `"Chương sau"` button)
+  - Automatic click-through for intermediate `"Quảng cáo"` / `"Tiếp tục đọc"` interstitials before syncing fresh chapter text
 - **Pronunciation dictionary** to fix how specific words are spoken
 - **Text cleanup**: watermark / URL / divider removal, Vietnamese diacritic normalization, custom blacklist
 - **Sleep timer**, keyboard shortcuts (`Space`, `←`, `→`, `Shift + ←/→`), Media Session controls

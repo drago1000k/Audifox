@@ -506,8 +506,14 @@ export default function AudiobookApp() {
   }
 
   async function handleNextChapter() {
-    if (!nextUrl || isFetching) return;
-    await loadChapterByUrl(nextUrl, isPlayingRef.current, true);
+    if (isFetching) return;
+    if (nextUrl) {
+      await loadChapterByUrl(nextUrl, isPlayingRef.current, true);
+      return;
+    }
+    if (bridgeSourceWindowRef.current && !bridgeSourceWindowRef.current.closed) {
+      requestBridgeNextChapter();
+    }
   }
 
   async function handlePrevChapter() {
@@ -573,6 +579,37 @@ export default function AudiobookApp() {
   const importChapterRef = useRef(importAndPlayChapter);
   importChapterRef.current = importAndPlayChapter;
   const postMessageReceivedRef = useRef(false);
+  const bridgeSourceWindowRef = useRef<Window | null>(null);
+  const bridgeAutoNextRef = useRef(false);
+  const bridgeNextPendingRef = useRef(false);
+  const lastBridgeSigRef = useRef('');
+
+  function requestBridgeNextChapter() {
+    if (bridgeNextPendingRef.current) return;
+    const srcWin = bridgeSourceWindowRef.current;
+    if (!srcWin || srcWin.closed) return;
+    bridgeNextPendingRef.current = true;
+    setIsSynthesizing(true);
+    try {
+      srcWin.postMessage({ type: 'AUDIFOX_REQUEST_NEXT_CHAPTER' }, '*');
+    } catch {
+      bridgeNextPendingRef.current = false;
+      setIsSynthesizing(false);
+    }
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('audifox-bridge');
+        bc.postMessage({ type: 'AUDIFOX_REQUEST_NEXT_CHAPTER' });
+        bc.close();
+      }
+    } catch {}
+    setTimeout(() => {
+      if (bridgeNextPendingRef.current) {
+        bridgeNextPendingRef.current = false;
+        setIsSynthesizing(false);
+      }
+    }, 6500);
+  }
 
   function parseClipboardPayload(raw: string): { title: string; content: string; sourceUrl: string } | null {
     const trimmed = raw.trim();
@@ -599,8 +636,35 @@ export default function AudiobookApp() {
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
       const data = event.data;
-      if (!data || data.type !== 'AUDIFOX_IMPORT_CHAPTER' || typeof data.content !== 'string') {
+      if (!data) return;
+
+      if (data.type === 'AUDIFOX_BRIDGE_STATE' && typeof data.autoNext === 'boolean') {
+        bridgeAutoNextRef.current = data.autoNext;
         return;
+      }
+
+      if (data.type !== 'AUDIFOX_IMPORT_CHAPTER' || typeof data.content !== 'string') {
+        return;
+      }
+
+      const sourceUrl = typeof data.sourceUrl === 'string' ? data.sourceUrl : '';
+      const incomingId =
+        typeof data.sendId === 'string'
+          ? data.sendId
+          : `${sourceUrl}::${data.content.slice(0, 180)}`;
+      if (incomingId === lastBridgeSigRef.current) {
+        try {
+          (event.source as Window | null)?.postMessage({ type: 'AUDIFOX_ACK' }, '*');
+        } catch {}
+        return;
+      }
+      lastBridgeSigRef.current = incomingId;
+      bridgeNextPendingRef.current = false;
+      if (event.source && typeof (event.source as Window).postMessage === 'function') {
+        bridgeSourceWindowRef.current = event.source as Window;
+      }
+      if (typeof data.bridgeAutoNext === 'boolean') {
+        bridgeAutoNextRef.current = data.bridgeAutoNext;
       }
 
       postMessageReceivedRef.current = true;
@@ -612,12 +676,25 @@ export default function AudiobookApp() {
       importChapterRef.current(
         typeof data.title === 'string' ? data.title : '',
         data.content,
-        typeof data.sourceUrl === 'string' ? data.sourceUrl : ''
+        sourceUrl
       );
     }
 
     window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        bc = new BroadcastChannel('audifox-bridge');
+        bc.addEventListener('message', handleMessage);
+      }
+    } catch {}
+    return () => {
+      window.removeEventListener('message', handleMessage);
+      if (bc) {
+        bc.removeEventListener('message', handleMessage);
+        bc.close();
+      }
+    };
   }, []);
 
   // Mobile bookmarklet fallback: auto-read clipboard when ?from=bookmarklet&clip=1
@@ -972,6 +1049,12 @@ export default function AudiobookApp() {
           isPlayingRef.current = false;
           setIsPlaying(false);
         }
+      } else if (
+        bridgeAutoNextRef.current &&
+        bridgeSourceWindowRef.current &&
+        !bridgeSourceWindowRef.current.closed
+      ) {
+        requestBridgeNextChapter();
       } else {
         setIsPlaying(false);
         isPlayingRef.current = false;
@@ -2190,7 +2273,7 @@ export default function AudiobookApp() {
                     Nguồn truyện hỗ trợ
                   </div>
                   <div className="flex flex-wrap gap-2 text-xs">
-                    {['tieuthuyetmang.com'].map((site) => (
+                    {['tieuthuyetmang.com', 'lanagarden.com'].map((site) => (
                       <span
                         key={site}
                         className={`px-2.5 py-1 rounded-full border ${
