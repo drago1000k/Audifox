@@ -6,7 +6,7 @@ import {
   Moon, Sun, BookOpen, Upload, Link2, RotateCcw,
   Timer, Download, Settings2, X, Check, AlertCircle, Loader2,
   List, Lock, ExternalLink, Zap, ClipboardPaste, BookMarked, ListOrdered,
-  LogIn, LogOut, Menu, PanelLeft, Crosshair
+  LogIn, LogOut, Menu, PanelLeft, Crosshair, ArrowUp
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import BookmarkletModal from '@/components/BookmarkletModal';
@@ -76,6 +76,7 @@ export default function AudiobookApp() {
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [userScrolledAway, setUserScrolledAway] = useState(false);
+  const [lastCloudSyncAt, setLastCloudSyncAt] = useState<number | null>(null);
   const programmaticScrollRef = useRef(false);
   const activeParagraphRef = useRef(-1);
   const [user, setUser] = useState<User | null>(null);
@@ -294,6 +295,7 @@ export default function AudiobookApp() {
             }
           })
         );
+        setLastCloudSyncAt(Date.now());
       } catch {}
     });
 
@@ -453,6 +455,19 @@ export default function AudiobookApp() {
     const cleanUrl = targetUrl.trim();
     if (!cleanUrl) return;
 
+    try {
+      const host = new URL(cleanUrl).hostname.toLowerCase();
+      if (host === 'lanagarden.com' || host.endsWith('.lanagarden.com')) {
+        stopPlayback();
+        setIsLocked(false);
+        setLockedReason(null);
+        setFetchError(
+          'lanagarden.com yêu cầu phiên đăng nhập trên trình duyệt. Hãy mở chương truyện trên tab lanagarden.com đã đăng nhập và bấm Bookmarklet (Nút đọc 1-Click) để gửi nội dung sang Audifox.'
+        );
+        return;
+      }
+    } catch {}
+
     const currentUrl = urlInput.trim();
     if (pushHistory && currentUrl && currentUrl !== cleanUrl && (content || isLocked)) {
       setChapterHistory((prev) =>
@@ -526,6 +541,46 @@ export default function AudiobookApp() {
     await loadChapterByUrl(targetPrev, isPlayingRef.current, false);
   }
 
+  function handleBrandHomeReset() {
+    hardResetAudio();
+    setContent('');
+    setParagraphs([]);
+    setSubChapters([]);
+    setChunks([]);
+    chunksRef.current = [];
+    setParagraphToChunkStart([]);
+    setChunkToParagraph([]);
+    chunkToParagraphRef.current = [];
+    chunkOffsetInParagraphRef.current = [];
+    setActiveParagraph(-1);
+    activeParagraphRef.current = -1;
+    setActiveWordRange(null);
+    setTitle('');
+    setUrlInput('');
+    setNextUrl(null);
+    setPrevUrl(null);
+    setSourceDomain('');
+    setFetchError('');
+    setIsLocked(false);
+    setLockedReason(null);
+    setResumeBanner(null);
+    setUserScrolledAway(false);
+    setMobileSidebarOpen(false);
+    setShowMobileMenu(false);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
+  function scrollToTop() {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    if (contentRef.current && contentRef.current.scrollTop > 0) {
+      contentRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
   function hardResetAudio() {
     playbackGenRef.current += 1;
     isPlayingRef.current = false;
@@ -556,8 +611,21 @@ export default function AudiobookApp() {
     setLockedReason(null);
     setResumeBanner(null);
 
-    const cleanTitle = (rawTitle || 'Chương đã nhập').normalize('NFC').trim();
-    const cleanBody = rawContent.normalize('NFC');
+    let cleanTitle = (rawTitle || '').normalize('NFC').replace(/\s*[-|]\s*(?:Đọc online|Lana Garden).*$/i, '').trim();
+    let cleanBody = rawContent.normalize('NFC');
+    const bodyLines = cleanBody.split(/\r?\n+/);
+    const firstBodyLine = (bodyLines[0] || '').trim();
+    if (/^Chương\s+\d+[^\n]*/i.test(firstBodyLine)) {
+      if (!cleanTitle) {
+        cleanTitle = firstBodyLine.slice(0, 240);
+      } else if (!/Chương\s+\d+/i.test(cleanTitle)) {
+        cleanTitle = `${cleanTitle} - ${firstBodyLine}`.slice(0, 260);
+      }
+      if (bodyLines.length > 1 && cleanTitle.toLowerCase().includes(firstBodyLine.toLowerCase())) {
+        cleanBody = bodyLines.slice(1).join('\n\n');
+      }
+    }
+    if (!cleanTitle) cleanTitle = 'Chương đã nhập';
     let domain = '';
     if (sourceUrl) {
       try {
@@ -1417,6 +1485,12 @@ export default function AudiobookApp() {
     };
   }, []);
 
+  // Keep document.title synced with active chapter title
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.title = title ? `${title} | Audifox` : 'Audifox';
+  }, [title]);
+
   // Keep audio volume/speed in sync
   useEffect(() => {
     if (audioRef.current) {
@@ -1642,12 +1716,19 @@ export default function AudiobookApp() {
                 >
                   {showMobileMenu ? <X size={18} /> : <Menu size={18} />}
                 </button>
-                <img
-                  src="/logo.png"
-                  alt="Audifox"
-                  className="w-7 h-7 rounded-lg object-contain shrink-0"
-                />
-                <span className="font-bold text-lg tracking-tight">Audifox</span>
+                <button
+                  type="button"
+                  onClick={handleBrandHomeReset}
+                  className="flex items-center gap-2.5 cursor-pointer hover:opacity-85 active:scale-[0.98] transition-all text-left"
+                  title="Về trang chủ"
+                >
+                  <img
+                    src="/logo.png"
+                    alt="Audifox"
+                    className="w-7 h-7 rounded-lg object-contain shrink-0"
+                  />
+                  <span className="font-bold text-lg tracking-tight">Audifox</span>
+                </button>
                 {title && (
                   <span className={`hidden lg:inline text-xs truncate max-w-[200px] ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
                     — {title}
@@ -2318,11 +2399,11 @@ export default function AudiobookApp() {
         )}
       </main>
 
-      {/* ===== FLOATING RETURN TO ACTIVE PARAGRAPH TRIGGER ===== */}
+      {/* ===== FLOATING RETURN TO ACTIVE PARAGRAPH ===== */}
       {userScrolledAway && isPlaying && chunks.length > 0 && !oledSleepMode && (
         <button
           onClick={scrollToActiveParagraph}
-          className="fixed bottom-44 sm:bottom-36 right-4 sm:right-8 z-40 px-3.5 py-2 rounded-full bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-semibold shadow-lg flex items-center gap-1.5 transition-all"
+          className="fixed bottom-44 sm:bottom-36 right-4 sm:right-6 z-40 px-3.5 py-2 rounded-full bg-[#8B5CF6] hover:bg-[#7C3AED] text-white text-xs font-semibold shadow-lg flex items-center gap-1.5 transition-all"
         >
           <Crosshair size={14} /> Quay về đoạn đang đọc
         </button>
@@ -2470,7 +2551,7 @@ export default function AudiobookApp() {
 
                 <button
                   onClick={() => setShowPronunciation(true)}
-                  className={`text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60`}
+                  className={`min-h-[36px] text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60`}
                   title="Từ điển phát âm"
                 >
                   🗣 Từ điển
@@ -2479,9 +2560,20 @@ export default function AudiobookApp() {
                 <button
                   onClick={exportMp3}
                   title="Xuất MP3"
-                  className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60`}
+                  className={`min-h-[36px] flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60`}
                 >
                   <Download size={13} /> MP3
+                </button>
+
+                <button
+                  type="button"
+                  onClick={scrollToTop}
+                  title="Lên đầu trang"
+                  aria-label="Lên đầu trang"
+                  className={`min-h-[36px] flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border ${panelClasses[theme]} hover:border-[#8B5CF6]/60 transition-colors`}
+                >
+                  <ArrowUp size={13} className="text-[#8B5CF6]" />
+                  <span className="hidden md:inline">Lên đầu trang</span>
                 </button>
               </div>
             </div>
@@ -2573,6 +2665,8 @@ export default function AudiobookApp() {
         isOpen={showBookshelf}
         onClose={() => setShowBookshelf(false)}
         items={bookshelfItems}
+        activeSeriesKey={chunks.length > 0 ? deriveSeriesKey(urlInput, title).seriesKey : ''}
+        lastSyncAt={lastCloudSyncAt}
         onResumeEntry={handleResumeBookshelf}
         onDeleteEntry={handleDeleteBookshelf}
         isLoggedIn={Boolean(user)}

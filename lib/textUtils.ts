@@ -43,8 +43,9 @@ export function sanitizeNovelText(text: string, blacklist: string[] = []): strin
     }
   }
 
-  // Remove dividers
+  // Remove dividers & trailing login/promo lines
   t = t.replace(/^[*=─—_~\-]{3,}$/gm, '');
+  t = t.replace(/^.*(?:đăng nhập để đọc tiếp|đăng nhập để lưu trữ|đăng nhập để đồng bộ|vui lòng đăng nhập để đọc).*$/gim, '');
 
   // Clean up whitespace while preserving paragraph breaks (\n\n)
   t = t

@@ -20,9 +20,33 @@ function buildBookmarkletScript(origin: string): string {
   }
   function norm(s){return (s||'').replace(/[\\u200b-\\u200f\\u202a-\\u202e\\u00ad\\ufeff]/g,'').replace(/\\u00a0/g,' ').replace(/\\s+([\\u0300-\\u036f])/g,'$1').normalize('NFC');}
   function extractChapter(){
-    var titleEl=document.querySelector('h1.chapter-title,h2.chapter-title,.chapter-title,.truyen-title,h1,h2');
-    var title=norm(titleEl?titleEl.textContent:document.title).trim();
-    if(title.length>200)title=title.slice(0,200);
+    var chapRe=/^Chương\\s+\\d+[^\\n]*/i;
+    var novelTitle=norm(document.title).replace(/\\s*[-|]\\s*(?:Đọc online|Lana Garden).*$/i,'').replace(/\\s+/g,' ').trim();
+    var ntEl=document.querySelector('.truyen-title,h1');
+    if(ntEl&&!ntEl.closest('#audifox-bridge-bar')){
+      var ntt=norm(ntEl.innerText||ntEl.textContent).replace(/\\s+/g,' ').trim();
+      if(ntt&&ntt.length<=160&&!chapRe.test(ntt)){novelTitle=ntt;}
+    }
+    var chapTitle='';
+    var headingCands=document.querySelectorAll('h1,h2,h3,h4,.chapter-title,[class*="chapter-title"]');
+    for(var h=0;h<headingCands.length;h++){
+      var hc=headingCands[h];
+      if(hc.closest('#audifox-bridge-bar'))continue;
+      var ht=norm(hc.innerText||hc.textContent).replace(/\\s+/g,' ').trim();
+      if(ht&&ht.length<=200&&chapRe.test(ht)){chapTitle=ht;break;}
+    }
+    if(!chapTitle){
+      var sideCands=document.querySelectorAll('button,a,[role="button"],li,div');
+      for(var s=0;s<sideCands.length;s++){
+        var sc=sideCands[s];
+        if(sc.closest('#audifox-bridge-bar'))continue;
+        var scls=(sc.className||'')+' '+((sc.parentElement&&sc.parentElement.className)||'');
+        var isAct=sc.getAttribute('aria-current')==='page'||sc.getAttribute('aria-current')==='true'||sc.getAttribute('aria-selected')==='true'||sc.getAttribute('data-active')==='true'||/(active|current|selected)/i.test(scls);
+        if(!isAct)continue;
+        var st=norm(sc.innerText||sc.textContent).replace(/\\s+/g,' ').trim();
+        if(st&&st.length<=200&&chapRe.test(st)){chapTitle=st;break;}
+      }
+    }
     var sels=['#chapter-c','.chapter-c','#content','.reading-content','#vung_doc','.entry-content','.chapter-content','#chapter-content','.prose .whitespace-pre-wrap','.prose','article'];
     var target=null;
     for(var i=0;i<sels.length;i++){
@@ -60,11 +84,20 @@ function buildBookmarkletScript(origin: string): string {
     }else{
       content=norm(clone.textContent).split(/\\r?\\n+/).map(function(l){return l.replace(/[ \\t]+/g,' ').trim();}).filter(Boolean).join('\\n\\n');
     }
-    if(title){
-      var lt=title.toLowerCase(),lines=content.split('\\n\\n');
-      while(lines.length>1&&(lines[0].toLowerCase()===lt||lt.indexOf(lines[0].toLowerCase())!==-1)){lines.shift();}
+    var lines=content.split('\\n\\n');
+    if(!chapTitle&&lines.length>0&&chapRe.test(lines[0])){
+      chapTitle=lines[0].trim().slice(0,200);
+    }
+    if(chapTitle){
+      var lct=chapTitle.toLowerCase();
+      while(lines.length>1&&(lines[0].toLowerCase()===lct||lct.indexOf(lines[0].toLowerCase())!==-1)){lines.shift();}
       content=lines.join('\\n\\n');
     }
+    if(novelTitle&&chapTitle&&chapTitle.toLowerCase().indexOf(novelTitle.toLowerCase())!==-1){
+      novelTitle='';
+    }
+    var title=(novelTitle&&chapTitle)?(novelTitle+' - '+chapTitle):(chapTitle||novelTitle);
+    if(title.length>260)title=title.slice(0,260);
     return {title:title,content:content};
   }
   function findContinueReadingButton(){
